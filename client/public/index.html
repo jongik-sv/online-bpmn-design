@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BPMN 협업 편집기</title>
+    
+    <!-- BPMN.js 스타일 -->
+    <link rel="stylesheet" href="https://unpkg.com/bpmn-js@17.2.1/dist/assets/diagram-js.css">
+    <link rel="stylesheet" href="https://unpkg.com/bpmn-js@17.2.1/dist/assets/bpmn-font/css/bpmn-embedded.css">
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+            overflow: hidden;
+        }
+        
+        .app-container {
+            display: flex;
+            height: 100vh;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .toolbar {
+            background: white;
+            border-bottom: 1px solid #ddd;
+            padding: 10px 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 100;
+        }
+        
+        .toolbar h1 {
+            font-size: 18px;
+            color: #333;
+            margin-right: 20px;
+        }
+        
+        .toolbar button {
+            padding: 8px 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            color: #333;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s ease;
+        }
+        
+        .toolbar button:hover {
+            background: #f5f5f5;
+            border-color: #007bff;
+        }
+        
+        .toolbar button.primary {
+            background: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+        
+        .toolbar button.primary:hover {
+            background: #0056b3;
+        }
+        
+        .toolbar .status {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #dc3545;
+        }
+        
+        .status-indicator.connected {
+            background: #28a745;
+        }
+        
+        .canvas-container {
+            flex: 1;
+            position: relative;
+            background: white;
+        }
+        
+        #canvas {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #ddd;
+            background: #fafafa;
+        }
+        
+        /* BPMN.js 전용 스타일 */
+        .djs-container {
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        .properties-panel {
+            width: 300px;
+            background: white;
+            border-left: 1px solid #ddd;
+            display: none;
+        }
+        
+        .properties-panel.show {
+            display: block;
+        }
+        
+        #properties-panel {
+            height: 100%;
+            overflow-y: auto;
+            padding: 15px;
+        }
+        
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .loading.hidden {
+            display: none;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #dc3545;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 1001;
+            display: none;
+        }
+        
+        .error-message.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .success-message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #28a745;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 1001;
+            display: none;
+        }
+        
+        .success-message.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+        
+        /* BPMN.js 스타일 오버라이드 */
+        .djs-palette {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .djs-context-pad {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        /* 반응형 */
+        @media (max-width: 768px) {
+            .properties-panel {
+                width: 250px;
+            }
+            
+            .toolbar h1 {
+                display: none;
+            }
+            
+            .toolbar {
+                padding: 8px 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="main-content">
+            <!-- 툴바 -->
+            <div class="toolbar">
+                <h1>🤝 BPMN 협업 편집기</h1>
+                
+                <button id="new-diagram">새 다이어그램</button>
+                <button id="load-diagram">불러오기</button>
+                <button id="save-diagram">저장</button>
+                <button id="export-svg">SVG 내보내기</button>
+                
+                <div style="border-left: 1px solid #ddd; height: 20px; margin: 0 10px;"></div>
+                
+                <button id="start-collaboration" class="primary">협업 시작</button>
+                <button id="stop-collaboration" style="display: none;">협업 중지</button>
+                
+                <button id="toggle-properties">속성 패널</button>
+                
+                <div class="status">
+                    <span id="status-text">연결 안됨</span>
+                    <div id="status-indicator" class="status-indicator"></div>
+                </div>
+            </div>
+            
+            <!-- 메인 캔버스 영역 -->
+            <div class="canvas-container">
+                <div id="canvas"></div>
+            </div>
+        </div>
+        
+        <!-- 속성 패널 -->
+        <div id="properties-panel-container" class="properties-panel">
+            <div id="properties-panel"></div>
+        </div>
+    </div>
+    
+    <!-- 로딩 스피너 -->
+    <div id="loading" class="loading">
+        <div class="spinner"></div>
+    </div>
+    
+    <!-- 에러 메시지 -->
+    <div id="error-message" class="error-message"></div>
+    
+    <!-- 성공 메시지 -->
+    <div id="success-message" class="success-message"></div>
+    
+    <!-- 스크립트 -->
+    <script>
+        // BpmnCollaborationEditor는 Webpack에 의해 전역으로 노출됩니다
+        
+        class AppController {
+            constructor() {
+                this.editor = null;
+                this.documentId = this.generateDocumentId();
+                this.userId = this.generateUserId();
+                this.userName = this.generateUserName();
+                this.isCollaborating = false;
+                
+                this.init();
+            }
+            
+            generateDocumentId() {
+                const urlParams = new URLSearchParams(window.location.search);
+                return urlParams.get('doc') || 'demo-document-' + Math.random().toString(36).substr(2, 9);
+            }
+            
+            generateUserId() {
+                let userId = localStorage.getItem('bpmn-user-id');
+                if (!userId) {
+                    userId = 'user-' + Math.random().toString(36).substr(2, 9);
+                    localStorage.setItem('bpmn-user-id', userId);
+                }
+                return userId;
+            }
+            
+            generateUserName() {
+                let userName = localStorage.getItem('bpmn-user-name');
+                if (!userName) {
+                    userName = prompt('사용자 이름을 입력하세요:', 'Anonymous') || 'Anonymous';
+                    localStorage.setItem('bpmn-user-name', userName);
+                }
+                return userName;
+            }
+            
+            async init() {
+                try {
+                    this.showLoading();
+                    
+                    // BPMN 협업 편집기 초기화 (전역 클래스 사용)
+                    this.editor = new window.BpmnCollaborationEditor({
+                        container: '#canvas',
+                        documentId: this.documentId,
+                        userId: this.userId,
+                        userName: this.userName,
+                        serverUrl: 'ws://localhost:3000/collaboration',
+                        enableCollaboration: true,
+                        enablePerformanceOptimization: true,
+                        enableConflictResolution: true
+                    });
+                    
+                    // 이벤트 리스너 설정
+                    this.setupEventListeners();
+                    
+                    // 편집기 이벤트 바인딩
+                    this.bindEditorEvents();
+                    
+                    this.hideLoading();
+                    this.showSuccess('BPMN 편집기가 초기화되었습니다');
+                    
+                    // URL 업데이트
+                    const newUrl = new URL(window.location);
+                    newUrl.searchParams.set('doc', this.documentId);
+                    window.history.replaceState({}, '', newUrl);
+                    
+                } catch (error) {
+                    this.hideLoading();
+                    this.showError('편집기 초기화 실패: ' + error.message);
+                    console.error('Initialization error:', error);
+                }
+            }
+            
+            setupEventListeners() {
+                // 툴바 버튼들
+                document.getElementById('new-diagram').addEventListener('click', () => this.newDiagram());
+                document.getElementById('load-diagram').addEventListener('click', () => this.loadDiagram());
+                document.getElementById('save-diagram').addEventListener('click', () => this.saveDiagram());
+                document.getElementById('export-svg').addEventListener('click', () => this.exportSVG());
+                
+                document.getElementById('start-collaboration').addEventListener('click', () => this.startCollaboration());
+                document.getElementById('stop-collaboration').addEventListener('click', () => this.stopCollaboration());
+                
+                document.getElementById('toggle-properties').addEventListener('click', () => this.toggleProperties());
+                
+                // 키보드 단축키
+                document.addEventListener('keydown', (e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                        switch (e.key) {
+                            case 's':
+                                e.preventDefault();
+                                this.saveDiagram();
+                                break;
+                            case 'n':
+                                e.preventDefault();
+                                this.newDiagram();
+                                break;
+                        }
+                    }
+                });
+            }
+            
+            bindEditorEvents() {
+                this.editor.on('initialized', () => {
+                    console.log('Editor initialized');
+                });
+                
+                this.editor.on('collaborationConnected', ({ type }) => {
+                    this.updateConnectionStatus(true);
+                    this.showSuccess(`${type} 프로바이더에 연결되었습니다`);
+                });
+                
+                this.editor.on('collaborationDisconnected', ({ type }) => {
+                    this.updateConnectionStatus(false);
+                    this.showError(`${type} 프로바이더 연결이 끊어졌습니다`);
+                });
+                
+                this.editor.on('conflictDetected', (conflict) => {
+                    this.showError(`충돌이 감지되었습니다: ${conflict.type}`);
+                });
+                
+                this.editor.on('conflictResolved', ({ conflict, resolution }) => {
+                    this.showSuccess(`충돌이 해결되었습니다: ${resolution.type}`);
+                });
+                
+                this.editor.on('error', (error) => {
+                    this.showError('편집기 오류: ' + error.message);
+                });
+                
+                // CollaborationPanel 이벤트 수신
+                document.addEventListener('bpmn:collaborationStarted', () => {
+                    this.isCollaborating = true;
+                    document.getElementById('start-collaboration').style.display = 'none';
+                    document.getElementById('stop-collaboration').style.display = 'inline-block';
+                    this.updateConnectionStatus(true);
+                });
+                
+                document.addEventListener('bpmn:collaborationStopped', () => {
+                    this.isCollaborating = false;
+                    document.getElementById('start-collaboration').style.display = 'inline-block';
+                    document.getElementById('stop-collaboration').style.display = 'none';
+                    this.updateConnectionStatus(false);
+                });
+            }
+            
+            async newDiagram() {
+                try {
+                    this.showLoading();
+                    
+                    const emptyDiagram = `<?xml version="1.0" encoding="UTF-8"?>
+                        <bpmn2:definitions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                                         xmlns:bpmn2="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                                         xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                                         xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                                         id="diagram_new"
+                                         targetNamespace="http://bpmn.io/schema/bpmn">
+                          <bpmn2:process id="Process_1" isExecutable="false">
+                          </bpmn2:process>
+                          <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+                            <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1">
+                            </bpmndi:BPMNPlane>
+                          </bpmndi:BPMNDiagram>
+                        </bpmn2:definitions>`;
+                    
+                    await this.editor.loadDiagram(emptyDiagram);
+                    this.hideLoading();
+                    this.showSuccess('새 다이어그램을 생성했습니다');
+                } catch (error) {
+                    this.hideLoading();
+                    this.showError('새 다이어그램 생성 실패: ' + error.message);
+                }
+            }
+            
+            async loadDiagram() {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.bpmn,.xml';
+                
+                input.onchange = async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    
+                    try {
+                        this.showLoading();
+                        const xml = await file.text();
+                        await this.editor.loadDiagram(xml);
+                        this.hideLoading();
+                        this.showSuccess('다이어그램을 불러왔습니다');
+                    } catch (error) {
+                        this.hideLoading();
+                        this.showError('다이어그램 불러오기 실패: ' + error.message);
+                    }
+                };
+                
+                input.click();
+            }
+            
+            async saveDiagram() {
+                try {
+                    this.showLoading();
+                    const xml = await this.editor.exportDiagram();
+                    
+                    const blob = new Blob([xml], { type: 'application/xml' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `diagram_${this.documentId}.bpmn`;
+                    a.click();
+                    
+                    URL.revokeObjectURL(url);
+                    
+                    this.hideLoading();
+                    this.showSuccess('다이어그램을 저장했습니다');
+                } catch (error) {
+                    this.hideLoading();
+                    this.showError('다이어그램 저장 실패: ' + error.message);
+                }
+            }
+            
+            async exportSVG() {
+                try {
+                    this.showLoading();
+                    const svg = await this.editor.exportSVG();
+                    
+                    const blob = new Blob([svg], { type: 'image/svg+xml' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `diagram_${this.documentId}.svg`;
+                    a.click();
+                    
+                    URL.revokeObjectURL(url);
+                    
+                    this.hideLoading();
+                    this.showSuccess('SVG를 내보냈습니다');
+                } catch (error) {
+                    this.hideLoading();
+                    this.showError('SVG 내보내기 실패: ' + error.message);
+                }
+            }
+            
+            async startCollaboration() {
+                // CollaborationPanel의 버튼을 클릭하여 협업 시작
+                const panelStartBtn = document.querySelector('#panel-start-collaboration');
+                if (panelStartBtn && !panelStartBtn.disabled) {
+                    panelStartBtn.click();
+                }
+            }
+            
+            async stopCollaboration() {
+                // CollaborationPanel의 버튼을 클릭하여 협업 중지
+                const panelStopBtn = document.querySelector('#panel-stop-collaboration');
+                if (panelStopBtn && !panelStopBtn.disabled) {
+                    panelStopBtn.click();
+                }
+            }
+            
+            toggleProperties() {
+                const panel = document.getElementById('properties-panel-container');
+                panel.classList.toggle('show');
+            }
+            
+            updateConnectionStatus(connected) {
+                const indicator = document.getElementById('status-indicator');
+                const text = document.getElementById('status-text');
+                
+                if (connected) {
+                    indicator.classList.add('connected');
+                    text.textContent = '연결됨';
+                } else {
+                    indicator.classList.remove('connected');
+                    text.textContent = '연결 안됨';
+                }
+            }
+            
+            showLoading() {
+                document.getElementById('loading').classList.remove('hidden');
+            }
+            
+            hideLoading() {
+                document.getElementById('loading').classList.add('hidden');
+            }
+            
+            showError(message) {
+                const errorEl = document.getElementById('error-message');
+                errorEl.textContent = message;
+                errorEl.classList.add('show');
+                
+                setTimeout(() => {
+                    errorEl.classList.remove('show');
+                }, 5000);
+            }
+            
+            showSuccess(message) {
+                const successEl = document.getElementById('success-message');
+                successEl.textContent = message;
+                successEl.classList.add('show');
+                
+                setTimeout(() => {
+                    successEl.classList.remove('show');
+                }, 3000);
+            }
+        }
+        
+        // 애플리케이션 시작
+        document.addEventListener('DOMContentLoaded', () => {
+            new AppController();
+        });
+    </script>
+</body>
+</html>
