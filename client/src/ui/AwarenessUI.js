@@ -73,7 +73,7 @@ export class AwarenessUI extends EventEmitter {
     // 스타일 적용
     this._applyStyles();
     
-    console.log('AwarenessUI initialized');
+    // AwarenessUI initialized silently
   }
   
   /**
@@ -188,23 +188,32 @@ export class AwarenessUI extends EventEmitter {
     
     // 마우스 이동 추적 (쓰로틀링)
     let lastCursorUpdate = 0;
-    canvasElement.addEventListener('mousemove', (event) => {
+    this.mouseMoveHandler = (event) => {
       const now = Date.now();
       if (now - lastCursorUpdate > this.options.cursorUpdateThrottle) {
         this._updateLocalCursor(event);
         lastCursorUpdate = now;
       }
-    });
+    };
+    canvasElement.addEventListener('mousemove', this.mouseMoveHandler);
     
     // 마우스 나가기
-    canvasElement.addEventListener('mouseleave', () => {
+    this.mouseLeaveHandler = () => {
       this._hideLocalCursor();
-    });
+    };
+    canvasElement.addEventListener('mouseleave', this.mouseLeaveHandler);
     
     // 클릭 이벤트
-    canvasElement.addEventListener('click', (event) => {
+    this.clickHandler = (event) => {
       this._handleCanvasClick(event);
-    });
+    };
+    canvasElement.addEventListener('click', this.clickHandler);
+    
+    // 마우스 들어오기 (트래킹 재시작)
+    this.mouseEnterHandler = (event) => {
+      this._updateLocalCursor(event);
+    };
+    canvasElement.addEventListener('mouseenter', this.mouseEnterHandler);
   }
   
   /**
@@ -430,7 +439,9 @@ export class AwarenessUI extends EventEmitter {
     const x = viewbox.x + (event.clientX - rect.left) * viewbox.width / rect.width;
     const y = viewbox.y + (event.clientY - rect.top) * viewbox.height / rect.height;
     
-    this.providerManager.updateCursor({ x, y });
+    if (this.providerManager && this.providerManager.updateCursor) {
+      this.providerManager.updateCursor({ x, y });
+    }
   }
   
   /**
@@ -639,7 +650,7 @@ export class AwarenessUI extends EventEmitter {
     style.textContent = `
       .awareness-ui {
         position: fixed;
-        top: 20px;
+        bottom: 20px;
         right: 20px;
         z-index: 1000;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -651,7 +662,7 @@ export class AwarenessUI extends EventEmitter {
         border: 1px solid #ddd;
         border-radius: 8px;
         box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        margin-bottom: 12px;
+        margin-top: 12px;
         min-width: 280px;
       }
       
@@ -832,6 +843,23 @@ export class AwarenessUI extends EventEmitter {
    * @public
    */
   destroy() {
+    // 마우스 이벤트 리스너 제거
+    const canvasElement = this.canvas.getContainer();
+    if (canvasElement) {
+      if (this.mouseMoveHandler) {
+        canvasElement.removeEventListener('mousemove', this.mouseMoveHandler);
+      }
+      if (this.mouseLeaveHandler) {
+        canvasElement.removeEventListener('mouseleave', this.mouseLeaveHandler);
+      }
+      if (this.clickHandler) {
+        canvasElement.removeEventListener('click', this.clickHandler);
+      }
+      if (this.mouseEnterHandler) {
+        canvasElement.removeEventListener('mouseenter', this.mouseEnterHandler);
+      }
+    }
+    
     // DOM 요소 제거
     if (this.container) {
       this.container.remove();
@@ -857,10 +885,12 @@ export class AwarenessUI extends EventEmitter {
    * @param {MouseEvent} event - 마우스 이벤트
    */
   _handleCanvasClick(event) {
-    // 캔버스 상의 클릭 위치 계산
-    const rect = event.target.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    // 캔버스 상의 클릭 위치 계산 (viewbox 변환 적용)
+    const rect = this.canvas.getContainer().getBoundingClientRect();
+    const viewbox = this.canvas.viewbox();
+    
+    const x = viewbox.x + (event.clientX - rect.left) * viewbox.width / rect.width;
+    const y = viewbox.y + (event.clientY - rect.top) * viewbox.height / rect.height;
     
     // 로컬 사용자의 커서 위치 업데이트
     this.localCursor = { x, y };

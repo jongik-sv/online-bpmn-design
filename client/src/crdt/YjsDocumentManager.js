@@ -53,6 +53,11 @@ export class YjsDocumentManager extends EventEmitter {
     this.updateCount = 0;
     this.lastSnapshot = null;
     
+    // 메모리 정리 관련
+    this.connectedUsers = new Map(); // userId -> { clientId, lastActivity }
+    this.memoryCleanupInterval = null;
+    this.memoryCleanupDelay = 60000; // 60초 후 정리
+    
     // 초기화
     this._initialize();
   }
@@ -78,6 +83,9 @@ export class YjsDocumentManager extends EventEmitter {
       // if (this.options.snapshotInterval > 0) {
       //   this._startSnapshotScheduler();
       // }
+      
+      // 메모리 정리 스케줄러 시작
+      this._startMemoryCleanupScheduler();
       
       this.isInitialized = true;
       this.emit('initialized', { documentId: this.documentId });
@@ -120,7 +128,7 @@ export class YjsDocumentManager extends EventEmitter {
   _initializeMetadata() {
     // 메타데이터 초기화 비활성화 (무한 루프 방지)
     // Y.js 업데이트 루프를 방지하기 위해 메타데이터 설정을 생략
-    console.log('Metadata initialization skipped to prevent update loops');
+    // Metadata initialization skipped silently
     
     /*
     const metadata = this.structures.metadata;
@@ -178,7 +186,7 @@ export class YjsDocumentManager extends EventEmitter {
     
     // Y.js 업데이트 리스너 일시 비활성화 (무한 루프 완전 차단)
     // 실시간 동기화는 WebSocket을 통해서만 수행
-    console.log('Y.js document update listeners disabled to prevent infinite loops');
+    // Y.js document update listeners disabled silently
     
     /*
     // 업데이트 카운터 (안전장치 포함)
@@ -469,6 +477,7 @@ export class YjsDocumentManager extends EventEmitter {
     
     // Awareness 변경 관찰
     awareness.on('change', changes => {
+      this._handleAwarenessChange(changes);
       this.emit('awarenessChanged', { changes });
     });
   }
@@ -520,6 +529,148 @@ export class YjsDocumentManager extends EventEmitter {
   }
   
   /**
+   * 메모리 정리 스케줄러 시작
+   * @private
+   */
+  _startMemoryCleanupScheduler() {
+    // 30초마다 연결된 사용자 확인 및 정리
+    this.memoryCleanupInterval = setInterval(() => {
+      this._checkAndCleanupMemory();
+    }, 30000);
+    
+    // Memory cleanup scheduler started silently
+  }
+  
+  /**
+   * Awareness 변경 처리 및 사용자 추적
+   * @private
+   */
+  _handleAwarenessChange(changes) {
+    if (!this.structures.awareness) return;
+    
+    const states = this.structures.awareness.getStates();
+    const now = Date.now();
+    
+    // 현재 연결된 사용자 업데이트
+    states.forEach((state, clientId) => {
+      if (state && state.user) {
+        this.connectedUsers.set(state.user.id, {
+          clientId,
+          lastActivity: now,
+          userName: state.user.name || 'Unknown'
+        });
+      }
+    });
+    
+    // 제거된 사용자 처리
+    if (changes.removed) {
+      changes.removed.forEach(clientId => {
+        // clientId로 사용자 찾아서 제거
+        for (const [userId, userData] of this.connectedUsers) {
+          if (userData.clientId === clientId) {
+            console.log(`[MEMORY] User ${userData.userName} (${userId}) disconnected from document ${this.documentId}`);
+            this.connectedUsers.delete(userId);
+            break;
+          }
+        }
+      });
+    }
+    
+    // Removed verbose memory logging
+  }
+  
+  /**
+   * 메모리 정리 확인 및 실행
+   * @private
+   */
+  _checkAndCleanupMemory() {
+    const connectedCount = this.connectedUsers.size;
+    
+    // Removed verbose checking log
+    
+    if (connectedCount === 0) {
+      console.log(`[MEMORY] No users connected to document ${this.documentId}. Starting cleanup in ${this.memoryCleanupDelay/1000} seconds...`);
+      
+      // 추가 대기 후 완전히 비어있으면 정리
+      setTimeout(() => {
+        if (this.connectedUsers.size === 0) {
+          console.log(`[MEMORY] Cleaning up empty document ${this.documentId}`);
+          this._performMemoryCleanup();
+        } else {
+          console.log(`[MEMORY] Document ${this.documentId} cleanup cancelled - users reconnected`);
+        }
+      }, this.memoryCleanupDelay);
+    }
+  }
+  
+  /**
+   * 메모리 정리 실행
+   * @private
+   */
+  _performMemoryCleanup() {
+    try {
+      console.log(`[MEMORY] Performing memory cleanup for document ${this.documentId}`);
+      
+      // CRDT 구조 정리
+      if (this.structures.elements) {
+        this.structures.elements.clear();
+      }
+      if (this.structures.metadata) {
+        this.structures.metadata.clear();
+      }
+      if (this.structures.comments) {
+        this.structures.comments.delete(0, this.structures.comments.length);
+      }
+      if (this.structures.locks) {
+        this.structures.locks.clear();
+      }
+      if (this.structures.versions) {
+        this.structures.versions.delete(0, this.structures.versions.length);
+      }
+      
+      // 가비지 컬렉션 강제 실행
+      if (this.doc.gc) {
+        this.doc.transact(() => {
+          // 트랜잭션 내에서 GC 트리거
+        });
+      }
+      
+      // 로컬 데이터 정리
+      this.connectedUsers.clear();
+      this.updateCount = 0;
+      if (this.versionHistory) {
+        this.versionHistory.length = 0;
+      }
+      
+      this.emit('memoryCleanupComplete', { documentId: this.documentId });
+      console.log(`[MEMORY] Memory cleanup completed for document ${this.documentId}`);
+      
+    } catch (error) {
+      console.error(`[MEMORY] Error during memory cleanup for document ${this.documentId}:`, error);
+      this.emit('error', { type: 'memoryCleanup', error });
+    }
+  }
+  
+  /**
+   * 연결된 사용자 수 조회
+   * @public
+   */
+  getConnectedUserCount() {
+    return this.connectedUsers.size;
+  }
+  
+  /**
+   * 연결된 사용자 목록 조회
+   * @public
+   */
+  getConnectedUsers() {
+    return Array.from(this.connectedUsers.entries()).map(([userId, userData]) => ({
+      userId,
+      ...userData
+    }));
+  }
+
+  /**
    * 리소스 정리
    * @public
    */
@@ -527,6 +678,11 @@ export class YjsDocumentManager extends EventEmitter {
     // 스냅샷 스케줄러 정지
     if (this.snapshotInterval) {
       clearInterval(this.snapshotInterval);
+    }
+    
+    // 메모리 정리 스케줄러 정지
+    if (this.memoryCleanupInterval) {
+      clearInterval(this.memoryCleanupInterval);
     }
     
     // 영속성 정리

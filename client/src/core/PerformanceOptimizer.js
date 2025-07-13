@@ -111,7 +111,7 @@ export class PerformanceOptimizer extends EventEmitter {
     // 성능 모니터링 시작
     this._startPerformanceMonitoring();
     
-    console.log('PerformanceOptimizer initialized');
+    // PerformanceOptimizer initialized silently
   }
   
   /**

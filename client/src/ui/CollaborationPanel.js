@@ -76,7 +76,7 @@ export class CollaborationPanel extends EventEmitter {
     // 메트릭 업데이트 시작
     this._startMetricsUpdate();
     
-    console.log('CollaborationPanel initialized');
+    // CollaborationPanel initialized silently
   }
   
   /**
@@ -411,23 +411,43 @@ export class CollaborationPanel extends EventEmitter {
       startBtn.disabled = true;
       startBtn.textContent = '시작 중...';
       
-      // 프로바이더 초기화
-      await this.providerManager.initialize();
+      // 프로바이더 초기화 또는 재연결
+      if (this.providerManager.isInitialized) {
+        // 이미 초기화된 경우 재연결 시도
+        console.log('Attempting to reconnect providers...');
+        await this.providerManager.reconnectAll();
+      } else {
+        // 처음 초기화하는 경우
+        console.log('Initializing providers...');
+        await this.providerManager.initialize();
+      }
       
       startBtn.textContent = '협업 중';
       startBtn.disabled = true;
       stopBtn.disabled = false;
       
       this.currentStatus.session = 'active';
+      
+      // 연결 상태 강제 업데이트
+      this._forceUpdateConnectionStatus();
+      
       this._showNotification('협업이 성공적으로 시작되었습니다', 'success');
       this.emit('collaborationStarted');
       
     } catch (error) {
+      console.error('Collaboration start error:', error);
+      
       const startBtn = this.container.querySelector('#panel-start-collaboration');
       startBtn.disabled = false;
       startBtn.textContent = '협업 시작';
       
-      this._showNotification(`Failed to start collaboration: ${error.message}`, 'error');
+      // 더 구체적인 에러 메시지 표시
+      let errorMessage = '협업 시작 실패';
+      if (error.message) {
+        errorMessage += `: ${error.message}`;
+      }
+      
+      this._showNotification(errorMessage, 'error');
       this.emit('collaborationError', error);
     }
   }
@@ -492,6 +512,33 @@ export class CollaborationPanel extends EventEmitter {
     if (indicator && text) {
       indicator.setAttribute('data-status', status);
       text.textContent = this._getStatusText(status);
+    }
+  }
+  
+  /**
+   * 연결 상태 강제 업데이트
+   * @private
+   */
+  _forceUpdateConnectionStatus() {
+    // 프로바이더 상태 확인 및 UI 업데이트
+    if (this.providerManager) {
+      const providerStats = this.providerManager.getStats();
+      
+      // WebSocket 상태 확인
+      if (this.providerManager.providers.websocket) {
+        const wsStatus = this.providerManager.providers.websocket.shouldConnect ? 'connected' : 'disconnected';
+        this._updateConnectionStatus('websocket', wsStatus);
+      }
+      
+      // IndexedDB 상태 확인
+      if (this.providerManager.providers.indexeddb) {
+        this._updateConnectionStatus('indexeddb', 'connected');
+      }
+      
+      // WebRTC 상태 확인
+      if (this.providerManager.providers.webrtc) {
+        this._updateConnectionStatus('webrtc', 'connected');
+      }
     }
   }
   
