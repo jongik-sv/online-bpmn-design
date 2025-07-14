@@ -202,21 +202,26 @@ export class BpmnSyncManager extends EventEmitter {
         case 'shape.create':
           // shape.append가 호출될 예정이면 무시 (중복 방지)
           if (!this._isAppendingShape) {
-            // shape.append의 일부일 수 있는지 확인 (더 강화된 조건)
-            const hasParent = context.shape && context.shape.parent;
+            // shape.append의 일부일 수 있는지 확인 (강화된 조건)
+            const hasValidParent = context.shape && context.shape.parent && 
+                                 context.shape.parent.id && 
+                                 context.shape.parent.id !== '__implicitroot';
             const hasUndefinedCoords = context.shape && (context.shape.x === undefined || context.shape.y === undefined);
             const hasContextPosition = context.position && context.position.x !== undefined && context.position.y !== undefined;
             
-            // shape.append가 발생할 가능성이 높은 경우: parent가 있고 (좌표가 undefined이거나 context에 position이 있음)
-            const isLikelyAppendOperation = hasParent && (hasUndefinedCoords || hasContextPosition);
+            console.log(`[POSITION] Shape.create analysis for ${context.shape?.id}:`);
+            console.log(`[POSITION] - hasValidParent: ${hasValidParent} (parent: ${context.shape?.parent?.id})`);
+            console.log(`[POSITION] - hasUndefinedCoords: ${hasUndefinedCoords} (coords: ${context.shape?.x},${context.shape?.y})`);
+            console.log(`[POSITION] - hasContextPosition: ${hasContextPosition} (context: ${context.position?.x},${context.position?.y})`);
+            
+            // shape.append가 발생할 가능성이 높은 경우: 유효한 parent가 있고 context.position이 있음
+            const isLikelyAppendOperation = hasValidParent && hasContextPosition;
             
             if (isLikelyAppendOperation) {
-              console.log(`[POSITION] 🚫 SKIPPING shape.create for ${context.shape.id} - will handle in shape.append (parent=${!!hasParent}, hasContext=${hasContextPosition})`);
-              
-              // shape.append에서 처리할 예정이므로 shape.create는 완전히 스킵
-              // Y.js에 저장하지 않음 - shape.append에서만 저장
+              console.log(`[POSITION] 🚫 BLOCKING shape.create for ${context.shape.id} - shape.append will follow with correct position`);
+              // Y.js 저장하지 않음 - shape.append에서만 저장
             } else {
-              console.log(`[POSITION] Direct shape.create - proceeding immediately (parent=${!!hasParent}, coords=${context.shape?.x},${context.shape?.y})`);
+              console.log(`[POSITION] 📤 Direct shape.create - proceeding immediately`);
               this._syncShapeCreate(context);
             }
           } else {
@@ -321,19 +326,8 @@ export class BpmnSyncManager extends EventEmitter {
     
     console.log(`[POSITION] 🔵 Local shape created: ${shape.id} - shape(${shape.x},${shape.y}) context(${position?.x || 'none'},${position?.y || 'none'})`);
     
-    // context.position이 없고 기본 좌표인 경우만 shape.append를 기다림
-    const hasParent = shape.parent && shape.parent.id && shape.parent.id !== '__implicitroot';
-    const hasDefaultCoords = (shape.x === 100 && shape.y === 100) || (shape.x === undefined || shape.y === undefined);
-    const hasNoContextPosition = !position || position.x === undefined || position.y === undefined;
-    
-    // shape.append에서 올바른 위치가 설정될 것으로 예상되는 경우만 차단
-    const shouldWaitForAppend = hasParent && hasDefaultCoords && hasNoContextPosition;
-    
-    if (shouldWaitForAppend) {
-      console.log(`[POSITION] 🚫 BLOCKING Y.js sync for ${shape.id} - waiting for shape.append with correct position`);
-      console.log(`[POSITION] 🚫 Reason: hasParent=${hasParent}, hasDefaultCoords=${hasDefaultCoords}, hasNoContextPosition=${hasNoContextPosition}`);
-      return;
-    }
+    // 이미 상위에서 shape.append 여부를 판단했으므로, 여기서는 바로 진행
+    // context.position이 있으면 사용, 없으면 shape 좌표 사용
     
     const elementData = this._extractElementData(shape, position);
     console.log(`[POSITION] 📤 Proceeding with Y.js sync: ${shape.id} at x=${elementData.x}, y=${elementData.y}`);
@@ -432,67 +426,48 @@ export class BpmnSyncManager extends EventEmitter {
     this._log(`Shape append context:`, 'debug', context);
     
     try {
-      // 이미 Y.js에 추가된 요소가 있는지 확인하고 위치 업데이트
+      // shape.append에서는 항상 새로운 요소여야 함
       const existingElement = this.yjsDocManager.getElement(shape.id);
       if (existingElement) {
-        // 기존 요소의 위치를 올바른 위치로 업데이트
-        console.log(`[POSITION] Updating existing element ${shape.id} position to x=${shape.x}, y=${shape.y}`);
+        console.error(`[ERROR] Shape ${shape.id} already exists in Y.js during append! This indicates shape.create was not properly blocked.`);
+        console.error(`[ERROR] Removing existing element and creating new one with correct position`);
         
-        // 즉시 Y.js 트랜잭션으로 위치 업데이트
-        this.yjsDocManager.doc.transact(() => {
-          const yElement = this.yjsDocManager.getElement(shape.id);
-          if (yElement) {
-            yElement.set('x', shape.x);
-            yElement.set('y', shape.y);
-            // 업데이트 후 검증
-            const verifyData = yElement.toJSON();
-            console.log(`[POSITION] 💾 Y.js updated & verified: ${shape.id} stored as x=${verifyData.x}, y=${verifyData.y}`);
-          }
-        }, this.clientId);
-      } else {
-        // 1. 새로운 shape 동기화와 위치 설정을 한 번에 처리
-        console.log(`[POSITION] Creating new element ${shape.id} at x=${shape.x}, y=${shape.y}`);
-        
-        // 하나의 트랜잭션으로 요소 생성 + 위치 설정
+        // 기존 요소 삭제 후 새로 생성
         this.yjsDocManager.doc.transact(() => {
           const yElements = this.yjsDocManager.getElementsMap();
-          
-          // 이미 존재하는지 확인
-          if (yElements.has(shape.id)) {
-            console.log(`[POSITION] Element ${shape.id} already exists, updating position only`);
-            const yElement = yElements.get(shape.id);
-            yElement.set('x', shape.x);
-            yElement.set('y', shape.y);
-          } else {
-            // 새로운 요소 생성 - shape.append에서는 이미 올바른 위치가 shape에 설정됨
-            const elementData = this._extractElementData(shape);
-            
-            console.log(`[POSITION] Using shape.append position for ${shape.id}: x=${elementData.x}, y=${elementData.y}`);
-            
-            const yElement = new Y.Map();
-            Object.entries(elementData).forEach(([key, value]) => {
-              if (value !== undefined) {
-                yElement.set(key, value);
-              }
-            });
-            
-            yElements.set(shape.id, yElement);
-            console.log(`[POSITION] Stored element ${shape.id} in Y.js with position x=${elementData.x}, y=${elementData.y}`);
-            
-            // 트랜잭션 완료 후 검증
-            const storedElement = yElements.get(shape.id);
-            const storedData = storedElement.toJSON();
-            console.log(`[POSITION] Y.js storage verification: ${shape.id} stored as x=${storedData.x}, y=${storedData.y}`);
-            
-            // 위치 정보가 올바르게 저장되었는지 강력한 검증
-            if (storedData.x !== elementData.x || storedData.y !== elementData.y) {
-              console.error(`[POSITION] Y.js storage MISMATCH! Expected x=${elementData.x}, y=${elementData.y} but got x=${storedData.x}, y=${storedData.y}`);
-            } else {
-              console.log(`[POSITION] Y.js storage SUCCESS: Position correctly stored for ${shape.id}`);
-            }
-          }
+          yElements.delete(shape.id);
+          console.log(`[POSITION] Deleted existing element ${shape.id}`);
         }, this.clientId);
       }
+      
+      // 새로운 요소 생성 (shape.append에서는 이미 올바른 위치가 shape에 설정됨)
+      console.log(`[POSITION] Creating new element ${shape.id} at x=${shape.x}, y=${shape.y}`);
+      
+      this.yjsDocManager.doc.transact(() => {
+        const yElements = this.yjsDocManager.getElementsMap();
+        const elementData = this._extractElementData(shape);
+        
+        console.log(`[POSITION] Using shape.append position for ${shape.id}: x=${elementData.x}, y=${elementData.y}`);
+        
+        const yElement = new Y.Map();
+        Object.entries(elementData).forEach(([key, value]) => {
+          if (value !== undefined) {
+            yElement.set(key, value);
+          }
+        });
+        
+        yElements.set(shape.id, yElement);
+        console.log(`[POSITION] Stored element ${shape.id} in Y.js with position x=${elementData.x}, y=${elementData.y}`);
+        
+        // 트랜잭션 완료 후 검증
+        const storedElement = yElements.get(shape.id);
+        const storedData = storedElement.toJSON();
+        if (storedData.x !== elementData.x || storedData.y !== elementData.y) {
+          console.error(`[POSITION] Y.js storage FAILED: Expected x=${elementData.x}, y=${elementData.y}, but got x=${storedData.x}, y=${storedData.y}`);
+        } else {
+          console.log(`[POSITION] Y.js storage SUCCESS: Position correctly stored for ${shape.id}`);
+        }
+      }, this.clientId);
       
       // 2. 연결이 생성된 경우 연결도 동기화
       if (connection) {
@@ -702,6 +677,7 @@ export class BpmnSyncManager extends EventEmitter {
     
     console.log(`[CONNECTION] Syncing connection create: ${connection.id} from ${connectionData.source} to ${connectionData.target}`);
     
+    debugger;
     this.yjsDocManager.doc.transact(() => {
       const yElements = this.yjsDocManager.getElementsMap();
       const yConnection = new Y.Map();
@@ -1130,8 +1106,8 @@ export class BpmnSyncManager extends EventEmitter {
     
     // overridePosition이 있으면 우선 사용 (context.position에서 전달된 실제 클릭 위치)
     if (overridePosition && overridePosition.x !== undefined && overridePosition.y !== undefined) {
-      x = overridePosition.x;
-      y = overridePosition.y;
+      x = element.x;
+      y = element.y;
       console.log(`[POSITION] 🎯 Using override position for ${element.id}: x=${x}, y=${y} (shape had: ${element.x}, ${element.y})`);
     }
     
@@ -1140,12 +1116,12 @@ export class BpmnSyncManager extends EventEmitter {
     const isValidY = typeof y === 'number' && !isNaN(y);
     
     if (!isValidX) {
-      x = 100; // 기본 x 좌표
+      x = overridePosition.x; // 기본 x 좌표
       console.log(`[POSITION] ⚠️ Invalid x for ${element.id}: ${element.x} -> ${x}`);
     }
     
     if (!isValidY) {
-      y = 100; // 기본 y 좌표  
+      y = overridePosition.y; // 기본 y 좌표  
       console.log(`[POSITION] ⚠️ Invalid y for ${element.id}: ${element.y} -> ${y}`);
     }
     
