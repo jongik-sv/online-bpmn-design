@@ -23,6 +23,10 @@ export class BpmnSyncManager extends EventEmitter {
     this.modeler = modeler;
     this.yjsDocManager = yjsDocumentManager;
     
+    // 고유 클라이언트 ID 생성 (Y.js origin 구분용)
+    this.clientId = 'client-' + Math.random().toString(36).substr(2, 9);
+    console.log(`[ORIGIN] BpmnSyncManager initialized with clientId: ${this.clientId}`);
+    
     // 설정 옵션
     this.options = {
       debounceDelay: 300,           // 디바운스 지연 시간 (ms)
@@ -117,9 +121,9 @@ export class BpmnSyncManager extends EventEmitter {
     
     // Y.Map 변경 관찰
     yElements.observe((event, transaction) => {
-      // 로컬 변경은 무시 (동기화 루프 방지)
-      if (transaction.origin === 'local') {
-        this._log(`Ignoring local Y.js transaction`, 'debug');
+      // 자신의 변경은 무시 (동기화 루프 방지)
+      if (transaction.origin === this.clientId) {
+        this._log(`Ignoring own Y.js transaction (origin: ${transaction.origin})`, 'debug');
         return;
       }
       
@@ -129,14 +133,15 @@ export class BpmnSyncManager extends EventEmitter {
         return;
       }
       
+      console.log(`[ORIGIN] Processing remote Y.js change (origin: ${transaction.origin})`);
       // 원격 변경 처리
       this._handleYjsChanges(event, transaction);
     });
     
     // 깊은 관찰자 설정 (중첩된 속성 변경 감지)
     yElements.observeDeep((events, transaction) => {
-      if (transaction.origin === 'local') {
-        this._log(`Ignoring local Y.js deep transaction`, 'debug');
+      if (transaction.origin === this.clientId) {
+        this._log(`Ignoring own Y.js deep transaction (origin: ${transaction.origin})`, 'debug');
         return;
       }
       
@@ -146,6 +151,7 @@ export class BpmnSyncManager extends EventEmitter {
         return;
       }
       
+      console.log(`[ORIGIN] Processing remote Y.js deep change (origin: ${transaction.origin})`);
       this._handleYjsDeepChanges(events, transaction);
     });
   }
@@ -381,7 +387,7 @@ export class BpmnSyncManager extends EventEmitter {
     this.yjsDocManager.doc.transact(() => {
       const yElements = this.yjsDocManager.getElementsMap();
       yElements.delete(shape.id);
-    }, 'local');
+    }, this.clientId);
     
     this.emit('elementDeleted', { elementId: shape.id });
   }
@@ -442,7 +448,7 @@ export class BpmnSyncManager extends EventEmitter {
             const verifyData = yElement.toJSON();
             console.log(`[POSITION] 💾 Y.js updated & verified: ${shape.id} stored as x=${verifyData.x}, y=${verifyData.y}`);
           }
-        }, 'position-update'); // 다른 origin 사용하여 명확한 구분
+        }, this.clientId);
       } else {
         // 1. 새로운 shape 동기화와 위치 설정을 한 번에 처리
         console.log(`[POSITION] Creating new element ${shape.id} at x=${shape.x}, y=${shape.y}`);
@@ -485,7 +491,7 @@ export class BpmnSyncManager extends EventEmitter {
               console.log(`[POSITION] Y.js storage SUCCESS: Position correctly stored for ${shape.id}`);
             }
           }
-        }, 'shape-append-create');
+        }, this.clientId);
       }
       
       // 2. 연결이 생성된 경우 연결도 동기화
@@ -677,7 +683,7 @@ export class BpmnSyncManager extends EventEmitter {
       }
       
       yElement.set('businessObject', yBusinessObject);
-    }, 'local');
+    }, this.clientId);
   }
   
   /**
@@ -707,7 +713,7 @@ export class BpmnSyncManager extends EventEmitter {
       });
       
       yElements.set(connection.id, yConnection);
-    }, 'local');
+    }, this.clientId);
   }
   
   /**
@@ -720,7 +726,7 @@ export class BpmnSyncManager extends EventEmitter {
     this.yjsDocManager.doc.transact(() => {
       const yElements = this.yjsDocManager.getElementsMap();
       yElements.delete(connection.id);
-    }, 'local');
+    }, this.clientId);
     
     this.emit('connectionDeleted', { connectionId: connection.id });
   }
@@ -740,7 +746,7 @@ export class BpmnSyncManager extends EventEmitter {
         const waypoints = connection.waypoints.map(wp => ({ x: wp.x, y: wp.y }));
         yConnection.set('waypoints', waypoints);
       }
-    }, 'local');
+    }, this.clientId);
     
     this.emit('connectionWaypointsUpdated', { 
       connectionId: connection.id, 
@@ -1092,7 +1098,7 @@ export class BpmnSyncManager extends EventEmitter {
                 break;
             }
           });
-        }, 'local');
+        }, this.clientId);
         
         // 처리된 변경사항 클리어
         this.pendingLocalChanges.clear();
@@ -1523,7 +1529,7 @@ export class BpmnSyncManager extends EventEmitter {
         
         yElements.set(element.id, yElement);
       });
-    }, 'local');
+    }, this.clientId);
     
     this.emit('diagramImported', { elementCount: elements.length });
   }
@@ -1641,7 +1647,7 @@ export class BpmnSyncManager extends EventEmitter {
       // Y.js 트랜잭션 실행
       this.yjsDocManager.doc.transact(() => {
         result = callback();
-      }, 'local');
+      }, this.clientId);
       
       this.transactionDepth--;
       return result !== false;
