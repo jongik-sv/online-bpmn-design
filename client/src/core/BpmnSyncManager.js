@@ -303,6 +303,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeCreate(context) {
+    debugger;
     const { shape, position } = context;
     
     // 이미 Y.js에 존재하는 요소인지 확인 (중복 생성 방지)
@@ -312,24 +313,23 @@ export class BpmnSyncManager extends EventEmitter {
       return;
     }
     
-    console.log(`[POSITION] 🔵 Local shape created: ${shape.id} at x=${shape.x}, y=${shape.y}`);
+    console.log(`[POSITION] 🔵 Local shape created: ${shape.id} - shape(${shape.x},${shape.y}) context(${position?.x || 'none'},${position?.y || 'none'})`);
     
-    // shape.append가 뒤따를 가능성이 높은 경우 Y.js 동기화를 완전히 차단
+    // context.position이 없고 기본 좌표인 경우만 shape.append를 기다림
     const hasParent = shape.parent && shape.parent.id && shape.parent.id !== '__implicitroot';
     const hasDefaultCoords = (shape.x === 100 && shape.y === 100) || (shape.x === undefined || shape.y === undefined);
-    const hasContextPosition = position && position.x !== undefined && position.y !== undefined;
+    const hasNoContextPosition = !position || position.x === undefined || position.y === undefined;
     
-    // shape.append에서 정확한 위치가 전달될 가능성이 높은 경우 Y.js 동기화 차단
-    const isLikelyAppendOperation = hasParent && (hasDefaultCoords || hasContextPosition);
+    // shape.append에서 올바른 위치가 설정될 것으로 예상되는 경우만 차단
+    const shouldWaitForAppend = hasParent && hasDefaultCoords && hasNoContextPosition;
     
-    if (isLikelyAppendOperation) {
-      console.log(`[POSITION] 🚫 BLOCKING Y.js sync for ${shape.id} - shape.append will follow with correct position`);
-      console.log(`[POSITION] 🚫 Reason: hasParent=${hasParent}, hasDefaultCoords=${hasDefaultCoords}, hasContextPosition=${hasContextPosition}`);
-      // Y.js 동기화를 완전히 차단하고 shape.append에서만 처리하도록 함
+    if (shouldWaitForAppend) {
+      console.log(`[POSITION] 🚫 BLOCKING Y.js sync for ${shape.id} - waiting for shape.append with correct position`);
+      console.log(`[POSITION] 🚫 Reason: hasParent=${hasParent}, hasDefaultCoords=${hasDefaultCoords}, hasNoContextPosition=${hasNoContextPosition}`);
       return;
     }
     
-    const elementData = this._extractElementData(shape);
+    const elementData = this._extractElementData(shape, position);
     console.log(`[POSITION] 📤 Proceeding with Y.js sync: ${shape.id} at x=${elementData.x}, y=${elementData.y}`);
     
     this._log(`Syncing shape create: ${shape.id} (${shape.type})`, 'info');
@@ -458,19 +458,10 @@ export class BpmnSyncManager extends EventEmitter {
             yElement.set('x', shape.x);
             yElement.set('y', shape.y);
           } else {
-            // 새로운 요소 생성
+            // 새로운 요소 생성 - shape.append에서는 이미 올바른 위치가 shape에 설정됨
             const elementData = this._extractElementData(shape);
             
-            // 위치 정보 강화 - 확실한 위치 보장
-            if (typeof shape.x === 'number' && !isNaN(shape.x) &&
-                typeof shape.y === 'number' && !isNaN(shape.y)) {
-              elementData.x = shape.x;
-              elementData.y = shape.y;
-              console.log(`[POSITION] Using confirmed position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
-            } else {
-              console.error(`[POSITION] Invalid position for ${shape.id}: x=${shape.x}, y=${shape.y} - this should not happen!`);
-              // 이 경우는 발생하면 안 되므로 에러 로그
-            }
+            console.log(`[POSITION] Using shape.append position for ${shape.id}: x=${elementData.x}, y=${elementData.y}`);
             
             const yElement = new Y.Map();
             Object.entries(elementData).forEach(([key, value]) => {
@@ -1117,15 +1108,22 @@ export class BpmnSyncManager extends EventEmitter {
    * 요소 데이터 추출
    * @private
    */
-  _extractElementData(element) {
+  _extractElementData(element, overridePosition = null) {
     const businessObject = element.businessObject || {};
     const di = element.di || {};
     
-    // 위치 정보 검증 - 유효한 값이 있으면 보존, 없으면 기본값
+    // 위치 정보 결정 - overridePosition 우선 사용
     let x = element.x;
     let y = element.y;
     
-    // 위치가 유효한지 확인 - 0도 유효한 위치임!
+    // overridePosition이 있으면 우선 사용 (context.position에서 전달된 실제 클릭 위치)
+    if (overridePosition && overridePosition.x !== undefined && overridePosition.y !== undefined) {
+      x = overridePosition.x;
+      y = overridePosition.y;
+      console.log(`[POSITION] 🎯 Using override position for ${element.id}: x=${x}, y=${y} (shape had: ${element.x}, ${element.y})`);
+    }
+    
+    // 위치가 여전히 유효하지 않으면 기본값 사용
     const isValidX = typeof x === 'number' && !isNaN(x);
     const isValidY = typeof y === 'number' && !isNaN(y);
     
@@ -1139,7 +1137,7 @@ export class BpmnSyncManager extends EventEmitter {
       console.log(`[POSITION] ⚠️ Invalid y for ${element.id}: ${element.y} -> ${y}`);
     }
     
-    // 최종 결과만 로그
+    // 최종 결과 로그
     console.log(`[POSITION] 📦 Extract result for ${element.id}: x=${x}, y=${y}`);
     
     return {
