@@ -192,6 +192,19 @@ export class CollaborationPanel extends EventEmitter {
           협업 중지
         </button>
       </div>
+      <div class="sync-controls">
+        <div class="sync-toggle">
+          <label class="toggle-switch">
+            <input type="checkbox" id="realtime-sync-toggle" checked>
+            <span class="slider"></span>
+            <span class="toggle-label">실시간 동기화</span>
+          </label>
+        </div>
+        <div class="sync-status" id="sync-status">
+          <span class="status-indicator active"></span>
+          <span class="status-text">동기화 활성</span>
+        </div>
+      </div>
       <div class="mode-selector">
         <label>Mode:</label>
         <select id="collaboration-mode">
@@ -319,6 +332,12 @@ export class CollaborationPanel extends EventEmitter {
     const modeSelector = this.container.querySelector('#collaboration-mode');
     modeSelector.addEventListener('change', (e) => {
       this._changeCollaborationMode(e.target.value);
+    });
+    
+    // 실시간 동기화 토글 이벤트
+    const syncToggle = this.container.querySelector('#realtime-sync-toggle');
+    syncToggle.addEventListener('change', (e) => {
+      this._toggleRealtimeSync(e.target.checked);
     });
     
     // 설정 이벤트
@@ -470,6 +489,28 @@ export class CollaborationPanel extends EventEmitter {
     this.currentStatus.session = 'inactive';
     this._showNotification('협업이 중지되었습니다', 'info');
     this.emit('collaborationStopped');
+  }
+  
+  /**
+   * 실시간 동기화 토글
+   * @private
+   */
+  _toggleRealtimeSync(enabled) {
+    const statusIndicator = this.container.querySelector('.status-indicator');
+    const statusText = this.container.querySelector('.status-text');
+    
+    if (enabled) {
+      statusIndicator.className = 'status-indicator active';
+      statusText.textContent = '동기화 활성';
+      this._showNotification('실시간 동기화가 활성화되었습니다', 'success');
+    } else {
+      statusIndicator.className = 'status-indicator inactive';
+      statusText.textContent = '동기화 비활성';
+      this._showNotification('실시간 동기화가 비활성화되었습니다', 'warning');
+    }
+    
+    // BpmnSyncManager에게 동기화 상태 변경 알림
+    this.emit('realtimeSyncToggled', { enabled });
   }
   
   /**

@@ -618,3 +618,83 @@ C:\Project\online_bpmn_design\
   3. collaboration_comments: 엘리먼트별 댓글
 
   MongoDB 연결: mongodb://210.1.1.40:27017/bpmn_collaboration
+
+
+
+  ● 로그를 분석해서 실행 흐름을 라인수와 함수로 정리해드리겠습니다.
+
+  🔍 실행 흐름 분석
+
+  1. shape.create 단계
+
+  라인 219: [POSITION] Direct shape.create - proceeding immediately (parent=false,
+  coords=undefined,undefined)
+  → _handleBpmnCommand() case 'shape.create'에서 direct create 판단
+
+  라인 322: [POSITION] 🔵 Local shape created: Activity_0wdtiqf - shape(undefined,undefined)
+  context(290,100)
+  → _syncShapeCreate() 함수 시작
+
+  라인 1137: [POSITION] 🎯 Using override position for Activity_0wdtiqf: x=undefined, y=undefined
+  → _extractElementData(shape, position) 호출, 하지만 position.x/y가 undefined
+
+  라인 1146-1151: Invalid x/y 처리로 290, 100 설정
+  → _extractElementData() 내부에서 기본값 처리
+
+  라인 339: [POSITION] 📤 Proceeding with Y.js sync: Activity_0wdtiqf at x=290, y=100
+  → Y.js 트랜잭션 실행하여 저장
+
+  2. shape.append 단계
+
+  라인 277: [POSITION] Starting shape.append for Activity_0wdtiqf, blocking individual shape.create
+  → _handleBpmnCommand() case 'shape.append' 시작
+
+  라인 403-404: Original shape position: x=240, y=60
+  → _syncShapeAppend() 함수 시작, BPMN.js가 설정한 다른 위치
+
+  라인 1817-1831: _getBestPosition() 호출하여 context.position {x: 290, y: 100} 사용
+  → 올바른 클릭 위치 감지
+
+  라인 412: ✅ Applied best position for Activity_0wdtiqf: x=290, y=100
+  → shape 객체의 x, y를 올바른 위치로 수정
+
+  라인 440: [POSITION] Updating existing element Activity_0wdtiqf position to x=290, y=100
+  → **문제 지점**: 이미 Y.js에 존재하는 요소 발견!
+
+  라인 450: [POSITION] 💾 Y.js updated & verified: Activity_0wdtiqf stored as x=290, y=100  
+  → 기존 요소의 위치만 업데이트
+
+  🚨 문제점 분석
+
+  핵심 문제:
+
+  1. 라인 219: parent=false로 판단해서 shape.create를 바로 실행
+  2. 라인 1137: context.position이 제대로 전달되지 않음 (x=undefined, y=undefined)
+  3. 라인 440: shape.append에서 이미 존재하는 요소를 발견
+
+  예상 시나리오:
+
+  shape.create 이벤트 → parent=false 판단 → 즉시 Y.js 저장 (잘못된 위치)
+          ↓
+  shape.append 이벤트 → 이미 존재함 발견 → 위치만 업데이트
+
+  근본 원인:
+
+  1. 라인 206-212: parent 감지 로직이 실패 (parent=false)
+  2. 라인 1130: context.position 전달 로직에 문제
+
+  💡 해결 방법
+
+  1. parent 감지 로직 강화:
+  // 현재 (라인 206)
+  const hasParent = context.shape && context.shape.parent;
+
+  // 개선안
+  const hasParent = context.shape && context.shape.parent && context.shape.parent.id !==
+  '__implicitroot';
+
+  2. context.position 전달 확인:
+  // _extractElementData 호출 시 position이 제대로 전달되는지 확인
+  console.log('context.position:', context.position); // 라인 322 이전에 추가
+
+  이 문제가 해결되면 shape.create가 제대로 차단되고, shape.append에서만 Y.js 저장이 일어날 것입니다! 🎯

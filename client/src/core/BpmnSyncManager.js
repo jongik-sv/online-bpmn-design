@@ -46,6 +46,9 @@ export class BpmnSyncManager extends EventEmitter {
     this.lastErrorTime = 0;                 // 마지막 에러 시간
     this.errorCooldown = 1000;              // 에러 쿨다운 (1초)
     this._isAppendingShape = false;         // shape.append 처리 중 플래그
+    this._isUpdatingWaypoints = false;      // waypoints 업데이트 중 플래그
+    this.isInitialSync = true;              // 초기 동기화 중 플래그
+    this.initialSyncTimeout = null;         // 초기 동기화 타임아웃
     
     // 위치 추적 관련 상태
     this.pendingDropPosition = null;        // 대기 중인 드롭 위치 정보
@@ -61,6 +64,9 @@ export class BpmnSyncManager extends EventEmitter {
     
     // 초기화
     this._initialize();
+    
+    // 초기 동기화 타이머 시작
+    this._detectInitialSyncCompletion();
   }
   
   /**
@@ -139,8 +145,8 @@ export class BpmnSyncManager extends EventEmitter {
       this._handleYjsChanges(event, transaction);
     });
     
-    // 깊은 관찰자 설정 (중첩된 속성 변경 감지)
-    yElements.observeDeep((events, transaction) => {
+    // 깊은 관찰자 설정 (중첩된 속성 변경 감지) - 스로틀링 및 초기 동기화 최적화
+    const throttledDeepChangeHandler = this._throttle((events, transaction) => {
       if (transaction.origin === this.clientId) {
         this._log(`Ignoring own Y.js deep transaction (origin: ${transaction.origin})`, 'debug');
         return;
@@ -152,9 +158,34 @@ export class BpmnSyncManager extends EventEmitter {
         return;
       }
       
-      console.log(`[ORIGIN] Processing remote Y.js deep change (origin: ${transaction.origin})`);
-      this._handleYjsDeepChanges(events, transaction);
-    });
+      // 초기 동기화 중이면 배치 처리로 최적화
+      if (this.isInitialSync) {
+        console.log(`[INITIAL_SYNC] Batching ${events.length} initial deep changes`);
+        this._batchInitialDeepChanges(events, transaction);
+        return;
+      }
+      
+      // 중요한 변경사항만 필터링
+      const significantEvents = events.filter(event => {
+        // 위치, 크기, 타입 변경 등 중요한 속성만 처리
+        const path = event.path || [];
+        const lastKey = path[path.length - 1];
+        return ['x', 'y', 'width', 'height', 'type', 'businessObject'].includes(lastKey);
+      });
+      
+      if (significantEvents.length === 0) {
+        this._log('No significant deep changes to process', 'debug');
+        return;
+      }
+      
+      console.log(`[ORIGIN] Processing ${significantEvents.length} significant Y.js deep changes (origin: ${transaction.origin})`);
+      this._handleYjsDeepChanges(significantEvents, transaction);
+    }, this.isInitialSync ? 1000 : 200); // 초기 동기화시 더 긴 스로틀링
+    
+    yElements.observeDeep(throttledDeepChangeHandler);
+    
+    // 초기 동기화 완료 감지
+    this._detectInitialSyncCompletion();
   }
   
   /**
@@ -163,9 +194,20 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _handleBpmnCommand(event) {
     console.log(`[FUNC] _handleBpmnCommand(${event.command})`);
+    console.log(`[EVENT_DEBUG] Command: ${event.command}, Context:`, event.context);
+    console.log(`[EVENT_DEBUG] Element ID: ${event.context?.shape?.id || event.context?.connection?.id || 'unknown'}`);
+    console.log(`[EVENT_DEBUG] Call stack depth: ${this.syncCallDepth}`);
+    console.log(`[EVENT_DEBUG] isApplyingRemoteChanges: ${this.isApplyingRemoteChanges}`);
+    // debugger;
     
-    if (this.isApplyingRemoteChanges) return;
-    if (!this.isRealtimeSyncEnabled) return;
+    if (this.isApplyingRemoteChanges) {
+      console.log(`[EVENT_DEBUG] Ignoring command during remote changes: ${event.command}`);
+      return;
+    }
+    if (!this.isRealtimeSyncEnabled) {
+      console.log(`[EVENT_DEBUG] Ignoring command - sync disabled: ${event.command}`);
+      return;
+    }
     
     this.syncCallDepth++;
     if (this.syncCallDepth > 10) {
@@ -198,6 +240,9 @@ export class BpmnSyncManager extends EventEmitter {
       // 커맨드에 따른 Y.js 업데이트 생성
       switch (command) {
         case 'shape.create':
+          console.log(`[EVENT_DEBUG] shape.create - isAppendingShape: ${this._isAppendingShape}`);
+          console.log(`[EVENT_DEBUG] shape.create - element: ${context.shape?.id}, position:`, context.position);
+          
           if (!this._isAppendingShape) {
             const hasValidParent = context.shape && context.shape.parent && 
                                  context.shape.parent.id && 
@@ -205,9 +250,17 @@ export class BpmnSyncManager extends EventEmitter {
             const hasContextPosition = context.position && context.position.x !== undefined && context.position.y !== undefined;
             const isLikelyAppendOperation = hasValidParent && hasContextPosition;
             
+            console.log(`[EVENT_DEBUG] shape.create - hasValidParent: ${hasValidParent}, hasContextPosition: ${hasContextPosition}`);
+            console.log(`[EVENT_DEBUG] shape.create - isLikelyAppendOperation: ${isLikelyAppendOperation}`);
+            
             if (!isLikelyAppendOperation) {
+              console.log(`[EVENT_DEBUG] Processing shape.create for ${context.shape?.id}`);
               this._syncShapeCreate(context);
+            } else {
+              console.log(`[EVENT_DEBUG] Skipping shape.create (likely append operation) for ${context.shape?.id}`);
             }
+          } else {
+            console.log(`[EVENT_DEBUG] Skipping shape.create (currently appending) for ${context.shape?.id}`);
           }
           break;
           
@@ -216,6 +269,14 @@ export class BpmnSyncManager extends EventEmitter {
           break;
           
         case 'shape.move':
+          console.log(`[EVENT_DEBUG] shape.move - isUpdatingWaypoints: ${this._isUpdatingWaypoints}`);
+          
+          // waypoints 업데이트 중이면 shape.move 무시
+          if (this._isUpdatingWaypoints) {
+            console.log(`[POSITION] Blocking shape.move during waypoints update`);
+            break;
+          }
+          
           if (context && (context.shapes || context.shape)) {
             this._syncShapeMove(context);
           } else {
@@ -232,21 +293,9 @@ export class BpmnSyncManager extends EventEmitter {
           break;
           
         case 'connection.create':
-          // shape.append에서 생성된 연결이 아닌 경우만 처리
-          if (!this._isAppendingShape) {
-            this._syncConnectionCreate(context);
-          } else {
-            // shape.append의 일부이지만 connection 정보가 완전하지 않을 수 있으므로 
-            // 짧은 지연 후 다시 시도
-            console.log(`[CONNECTION] Deferring connection.create during shape.append: ${context.connection?.id}`);
-            setTimeout(() => {
-              const { connection } = context;
-              if (connection && connection.source && connection.target) {
-                console.log(`[CONNECTION] Retrying deferred connection create: ${connection.id}`);
-                this._syncConnectionCreate(context);
-              }
-            }, 50);
-          }
+          console.log(`[EVENT_DEBUG] connection.create - isAppendingShape: ${this._isAppendingShape}`);
+          // 연결 생성은 항상 동기화 (원격에 연결선 표시를 위해)
+          this._syncConnectionCreate(context);
           break;
           
         case 'connection.delete':
@@ -254,15 +303,27 @@ export class BpmnSyncManager extends EventEmitter {
           break;
           
         case 'connection.updateWaypoints':
+          console.log(`[EVENT_DEBUG] connection.updateWaypoints - connection: ${context.connection?.id}`);
+          console.log(`[EVENT_DEBUG] isApplyingRemoteChanges: ${this.isApplyingRemoteChanges}`);
+          
+          // 원격 변경 적용 중이면 waypoints 업데이트 차단 (위치 문제 방지)
+          if (this.isApplyingRemoteChanges) {
+            console.log(`[WAYPOINTS] Blocking waypoints update during remote changes to prevent position shifts`);
+            return;
+          }
+          
+          // 로컬 변경의 waypoints 업데이트는 허용 (연결선 모양 동기화)
+          console.log(`[WAYPOINTS] Processing local waypoints update for ${context.connection?.id}`);
           this._syncConnectionWaypoints(context);
-          break;
           
         case 'shape.append':
+          console.log(`[EVENT_DEBUG] shape.append - element: ${context.shape?.id}`);
           this._isAppendingShape = true;
           try {
             this._syncShapeAppend(context);
           } finally {
             this._isAppendingShape = false;
+            console.log(`[EVENT_DEBUG] shape.append completed for ${context.shape?.id}`);
           }
           break;
           
@@ -292,6 +353,7 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _syncShapeCreate(context) {
     console.log(`[FUNC] _syncShapeCreate(${context})`);
+    // debugger;
     
     const { shape, position } = context;
     const existingElement = this.yjsDocManager.getElement(shape.id);
@@ -342,6 +404,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _syncShapeDelete(context) {
     console.log(`[FUNC] _syncShapeDelete(${context.shape?.id})`);    
+    // debugger;
+
     const { shape } = context;
     
     this.yjsDocManager.doc.transact(() => {
@@ -358,6 +422,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _syncShapeAppend(context) {
     console.log(`[FUNC] _syncShapeAppend(${context})`);
+    // debugger;
+
     
     const { shape, source, connection } = context;
     const bestPosition = this._getBestPosition(context, shape.id);
@@ -449,36 +515,9 @@ export class BpmnSyncManager extends EventEmitter {
           this._log(`Connection ${connection.id} missing source/target, skipping sync`, 'warn');
         }
       } else {
-        this._log(`No connection in shape append context`, 'debug');
-        
-        // connection이 없는 경우 자동으로 연결 생성 시도
-        // shape.append는 일반적으로 연결을 포함하므로 누락된 경우 생성
-        if (source && shape) {
-          console.log(`[CONNECTION] No connection found in context, will check for auto-created connection later`);
-          
-          // 짧은 지연 후 연결이 생성되었는지 확인
-          setTimeout(() => {
-            // 최근 생성된 연결 중에서 source와 target이 일치하는 것 찾기
-            const canvas = this.modeler.get('canvas');
-            const rootElement = canvas.getRootElement();
-            
-            if (rootElement && rootElement.children) {
-              const recentConnection = rootElement.children.find(child => 
-                child.type && child.type.includes('Flow') &&
-                child.source && child.target &&
-                child.source.id === source.id && 
-                child.target.id === shape.id
-              );
-              
-              if (recentConnection) {
-                console.log(`[CONNECTION] Found auto-created connection: ${recentConnection.id}`);
-                this._syncConnectionCreate({ connection: recentConnection });
-              } else {
-                console.log(`[CONNECTION] No auto-created connection found for ${source.id} -> ${shape.id}`);
-              }
-            }
-          }, 100);
-        }
+        this._log(`No connection in shape append context - this is normal for shape.append`, 'debug');
+        // connection은 별도의 connection.create 이벤트에서 처리됨
+        console.log(`[CONNECTION] Connection will be handled by separate connection.create event`);
       }
       
     } catch (error) {
@@ -492,6 +531,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _syncShapeMove(context) {
     console.log(`[FUNC] _syncShapeMove(${context})`);
+    // debugger;
+
     let { shapes, delta, shape } = context;
     
     // 단일 shape을 배열로 변환
@@ -547,6 +588,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _syncUpdateProperties(context) {
     console.log(`[FUNC] _syncUpdateProperties(${context.shape?.id})`);    
+    // debugger;
+
     const { element, properties } = context;
     
     this.yjsDocManager.doc.transact(() => {
@@ -597,8 +640,11 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncConnectionCreate(context) {
-    console.log(`[FUNC] _syncConnectionCreate(${context.shape?.id})`);        
-    const { connection } = context;
+    const { connection } = context;    
+    console.log(`[FUNC] _syncConnectionCreate(${connection})`);
+    // debugger;
+
+
     const connectionData = this._extractConnectionData(connection);
     
     // source/target이 누락된 경우 연결 동기화 중단
@@ -609,7 +655,7 @@ export class BpmnSyncManager extends EventEmitter {
     
     console.log(`[CONNECTION] Syncing connection create: ${connection.id} from ${connectionData.source} to ${connectionData.target}`);
     
-    debugger;
+    // debugger;
     this.yjsDocManager.doc.transact(() => {
       const yElements = this.yjsDocManager.getElementsMap();
       const yConnection = new Y.Map();
@@ -629,6 +675,9 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncConnectionDelete(context) {
+    console.log(`[FUNC] _syncConnectionDelete(${context})`);
+    // debugger;    
+
     const { connection } = context;
     
     this.yjsDocManager.doc.transact(() => {
@@ -644,7 +693,12 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncConnectionWaypoints(context) {
+    console.log(`[FUNC] _syncConnectionWaypoints(${context})`);
+    
     const { connection } = context;
+    
+    // waypoints 데이터만 동기화 (요소 위치에는 영향 주지 않음)
+    console.log(`[WAYPOINTS] Syncing waypoints for connection ${connection.id}`);
     
     this.yjsDocManager.doc.transact(() => {
       const yElements = this.yjsDocManager.getElementsMap();
@@ -653,6 +707,9 @@ export class BpmnSyncManager extends EventEmitter {
       if (yConnection) {
         const waypoints = connection.waypoints.map(wp => ({ x: wp.x, y: wp.y }));
         yConnection.set('waypoints', waypoints);
+        console.log(`[WAYPOINTS] Updated waypoints for ${connection.id}:`, waypoints);
+      } else {
+        console.log(`[WAYPOINTS] Connection ${connection.id} not found in Y.js document`);
       }
     }, this.clientId);
     
@@ -670,6 +727,19 @@ export class BpmnSyncManager extends EventEmitter {
     // console.log(`[FUNC] _handleElementsChanged(${event})`);   
     // 원격 변경 적용 중이면 무시
     if (this.isApplyingRemoteChanges) {
+      console.log(`[ELEMENTS_CHANGED] Ignoring - applying remote changes`);
+      return;
+    }
+    
+    // waypoints 업데이트 중이면 무시 (위치 변경 방지)
+    if (this._isUpdatingWaypoints) {
+      console.log(`[ELEMENTS_CHANGED] Blocking elements.changed during waypoints update`);
+      return;
+    }
+    
+    // shape.append 중이면 무시 (위치 변경 방지)
+    if (this._isAppendingShape) {
+      console.log(`[ELEMENTS_CHANGED] Blocking elements.changed during shape.append`);
       return;
     }
     
@@ -693,11 +763,76 @@ export class BpmnSyncManager extends EventEmitter {
   }
   
   /**
+   * 스로틀링 유틸리티 함수
+   * @private
+   */
+  _throttle(func, delay) {
+    let timeoutId;
+    let lastExecTime = 0;
+    
+    return function(...args) {
+      const currentTime = Date.now();
+      
+      if (currentTime - lastExecTime > delay) {
+        func.apply(this, args);
+        lastExecTime = currentTime;
+      } else {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          func.apply(this, args);
+          lastExecTime = Date.now();
+        }, delay - (currentTime - lastExecTime));
+      }
+    }.bind(this);
+  }
+  
+  /**
+   * 초기 동기화 완료 감지
+   * @private
+   */
+  _detectInitialSyncCompletion() {
+    // 3초 후 초기 동기화 완료로 간주
+    this.initialSyncTimeout = setTimeout(() => {
+      this.isInitialSync = false;
+      console.log('[INITIAL_SYNC] Initial synchronization completed');
+    }, 3000);
+  }
+  
+  /**
+   * 초기 동기화 중 깊은 변경사항 배치 처리
+   * @private
+   */
+  _batchInitialDeepChanges(events, transaction) {
+    // 초기 동기화 중에는 UI 업데이트를 최소화하고 데이터만 동기화
+    const elementUpdates = new Map();
+    
+    events.forEach(event => {
+      const path = event.path || [];
+      if (path.length > 0) {
+        const elementId = path[0];
+        if (!elementUpdates.has(elementId)) {
+          elementUpdates.set(elementId, []);
+        }
+        elementUpdates.get(elementId).push(event);
+      }
+    });
+    
+    // 배치로 처리하여 성능 최적화
+    if (elementUpdates.size > 0) {
+      console.log(`[INITIAL_SYNC] Batch processing ${elementUpdates.size} elements`);
+      // 실제 처리는 기존 함수 재사용하되 UI 업데이트는 최소화
+      this._handleYjsDeepChanges(events, transaction);
+    }
+  }
+  
+  /**
    * Y.js 깊은 변경사항 처리
    * @private
    */
   _handleYjsDeepChanges(events, transaction) {
-    console.log(`[FUNC] _handleElementsChanged(${transaction})`);       
+    console.log(`[FUNC] _handleYjsDeepChanges(${events.length} events)`);     
+    // debugger;  
+
     // 자신의 변경인 경우 무시 (동기화 루프 방지)
     if (transaction.origin === this.clientId) {
       return;
@@ -764,7 +899,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _handleYjsChanges(event, transaction) {
     console.log(`[FUNC] _handleYjsChanges(${event.changes.keys.size} changes, origin: ${transaction.origin})`);
-    
+    // debugger;  
+
     if (transaction.origin === this.clientId) return;
     this.isApplyingRemoteChanges = true;
     
@@ -791,6 +927,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _applyRemoteElementCreate(elementId) {
     console.log(`[FUNC] _applyRemoteElementCreate(${elementId})`);
+    // debugger;  
+
     
     const yElement = this.yjsDocManager.getElement(elementId);
     if (!yElement) return;
@@ -824,6 +962,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _applyRemoteElementUpdate(elementId) {
     console.log(`[FUNC] _applyRemoteElementUpdate(${elementId})`);
+    // debugger;  
+
     
     const element = this.elementRegistry.get(elementId);
     if (!element) return;
@@ -833,80 +973,8 @@ export class BpmnSyncManager extends EventEmitter {
     
     const updates = yElement.toJSON();
     
-    // 위치/크기 업데이트 (더 엄격한 비교)
-    if (updates.x !== undefined || updates.y !== undefined) {
-      const currentX = Math.round(element.x || 0);
-      const currentY = Math.round(element.y || 0);
-      const newX = Math.round(updates.x || element.x || 0);
-      const newY = Math.round(updates.y || element.y || 0);
-      
-      const delta = {
-        x: newX - currentX,
-        y: newY - currentY
-      };
-      
-      console.log(`[POSITION] Position delta for ${elementId}: dx=${delta.x}, dy=${delta.y} (current: ${currentX},${currentY} -> new: ${newX},${newY})`);
-      
-      // 실제 위치 변화가 있을 때만 업데이트 (1픽셀 이상 차이)
-      if (Math.abs(delta.x) >= 1 || Math.abs(delta.y) >= 1) {
-        console.log(`[POSITION] Applying position update to ${elementId}`);
-        
-        try {
-          // 안전한 위치 업데이트 - GraphicsFactory를 통한 직접 업데이트
-          this.isApplyingRemoteChanges = true;
-          
-          // 요소 좌표 직접 업데이트
-          element.x = updates.x;
-          element.y = updates.y;
-          
-          // DI (Diagram Interchange) 업데이트
-          if (element.di && element.di.bounds) {
-            element.di.bounds.x = updates.x;
-            element.di.bounds.y = updates.y;
-          }
-          
-          // SVG 그래픽스 직접 업데이트 (리렌더링 우회)
-          const canvas = this.modeler.get('canvas');
-          const graphicsFactory = this.modeler.get('graphicsFactory');
-          const elementRegistry = this.modeler.get('elementRegistry');
-          
-          // 요소 등록 업데이트
-          elementRegistry._elements[elementId].element = element;
-          
-          // SVG 그래픽 위치 업데이트
-          const gfx = canvas.getGraphics(element);
-          if (gfx) {
-            gfx.setAttribute('transform', `translate(${updates.x}, ${updates.y})`);
-          }
-          
-          console.log(`[POSITION] Direct graphics update applied to ${elementId} at x=${updates.x}, y=${updates.y}`);
-          
-        } catch (error) {
-          console.error(`[POSITION] Error applying direct graphics update to ${elementId}:`, error);
-          
-          // 최후의 폴백: 요소 재생성
-          console.log(`[POSITION] Attempting element recreation for ${elementId}`);
-          try {
-            // 간단한 좌표 업데이트만 수행
-            element.x = updates.x;
-            element.y = updates.y;
-            
-            if (element.di && element.di.bounds) {
-              element.di.bounds.x = updates.x;
-              element.di.bounds.y = updates.y;
-            }
-            
-            console.log(`[POSITION] Coordinate-only update applied to ${elementId}`);
-          } catch (finalError) {
-            console.error(`[POSITION] All position update methods failed for ${elementId}:`, finalError);
-          }
-        } finally {
-          this.isApplyingRemoteChanges = false;
-        }
-      } else {
-        console.log(`[POSITION] No position change needed for ${elementId}`);
-      }
-    }
+    // 위치 업데이트 제거 - 이미 생성시 정확한 위치가 전달되므로 불필요
+    console.log(`[POSITION] Skipping position update for ${elementId} - position should be correct from creation`);
     
     // 크기 업데이트
     if (updates.width !== undefined || updates.height !== undefined) {
@@ -958,6 +1026,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _startBatchUpdateProcessor() {
     console.log(`[FUNC] _startBatchUpdateProcessor()`);
+    // debugger;  
+
     this.batchUpdateInterval = setInterval(() => {
       if (this.pendingLocalChanges.size === 0) return;
       
@@ -1007,7 +1077,9 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _extractElementData(element, overridePosition = null) {
-    console.log(`[FUNC] _extractElementData(${element.id}, override: ${!!overridePosition})`);
+    console.log(`[FUNC] _extractElementData(${element}, override: ${!!overridePosition})`);
+    // debugger;  
+
     
     const businessObject = element.businessObject || {};
     const di = element.di || {};
@@ -1052,7 +1124,9 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _extractConnectionData(connection) {
-    console.log(`[FUNC] _extractConnectionData(${element.id}, override: ${!!overridePosition})`);
+    console.log(`[FUNC] _extractConnectionData(${connection})`);
+    // debugger;  
+
     const businessObject = connection.businessObject || {};
     
     // source/target 정보를 더 안전하게 추출
@@ -1127,6 +1201,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _createRemoteShape(elementId, elementData) {
     console.log(`[FUNC] _createRemoteShape(elementId : ${elementId}, elementData: ${elementData})`);  
+    // debugger;  
+
     const { type, x, y, width, height, parent, businessObject } = elementData;
     
     // 요소가 이미 존재하는지 다시 한 번 확인
@@ -1240,6 +1316,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _createRemoteConnection(elementId, connectionData) {
     console.log(`[FUNC] _createRemoteConnection(elementId : ${elementId}, connectionData: ${connectionData})`);      
+    // debugger;  
+
     const { source, target, waypoints, businessObject } = connectionData;
     
     // source, target이 undefined인 경우 로그 출력 후 리턴
@@ -1254,18 +1332,8 @@ export class BpmnSyncManager extends EventEmitter {
     if (!sourceElement || !targetElement) {
       this._log(`Cannot create connection ${elementId}: missing endpoints (source: ${source}, target: ${target})`);
       
-      // 짧은 지연 후 재시도 (요소가 아직 생성되지 않았을 수 있음)
-      setTimeout(() => {
-        const retrySource = this.elementRegistry.get(source);
-        const retryTarget = this.elementRegistry.get(target);
-        
-        if (retrySource && retryTarget) {
-          this._log(`Retrying connection creation for ${elementId}`);
-          this._createRemoteConnection(elementId, connectionData);
-        } else {
-          this._log(`Failed to create connection ${elementId} after retry: still missing endpoints`, 'warn');
-        }
-      }, 100);
+      // 지연 재시도 제거 - waypoints 업데이트 방지
+      this._log(`Failed to create connection ${elementId}: missing endpoints (source: ${source}, target: ${target}) - no retry to prevent waypoints issues`, 'warn');
       return;
     }
     
@@ -1290,11 +1358,29 @@ export class BpmnSyncManager extends EventEmitter {
         {
           id: elementId,
           type: connectionData.type,
-          waypoints: waypoints,
           businessObject: connectionBusinessObject
         },
         this.modeler.get('canvas').getRootElement()
       );
+      
+      // waypoints가 있는 경우 연결 생성 후 설정 (이벤트 발생 방지)
+      if (waypoints && waypoints.length > 0) {
+        try {
+          // 연결 객체에 직접 waypoints 설정
+          connection.waypoints = waypoints;
+          
+          // DI (Diagram Interchange)에도 waypoints 설정
+          if (connection.di) {
+            connection.di.waypoint = waypoints.map(wp => ({ x: wp.x, y: wp.y }));
+          }
+          
+          console.log(`[CONNECTION] Set waypoints for ${elementId} without triggering events:`, waypoints);
+        } catch (waypointError) {
+          console.error(`[CONNECTION] Failed to set waypoints for ${elementId}:`, waypointError);
+        }
+      }
+      
+      console.log(`[CONNECTION] Created remote connection ${elementId}`);
       
       return connection;
     } finally {
@@ -1309,6 +1395,7 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _createBusinessObject(data) {
     console.log(`[FUNC] _createBusinessObject(data : ${data})`);      
+    // debugger;  
 
     try {
       const bpmnFactory = this.modeler.get('bpmnFactory');
@@ -1365,7 +1452,9 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleSelectionChanged(event) {
-    console.log(`[FUNC] _handleSelectionChanged(event : ${event})`);      
+    console.log(`[FUNC] _handleSelectionChanged(event : ${event}), this.isApplyingRemoteChanges : ${this.isApplyingRemoteChanges}`);      
+    // // debugger;  
+
     // 원격 변경 적용 중이면 무시 (동기화 루프 방지)
     if (this.isApplyingRemoteChanges) {
       return;
@@ -1514,6 +1603,8 @@ export class BpmnSyncManager extends EventEmitter {
    */
   _safeYjsTransaction(callback) {
     console.log(`[FUNC] _safeYjsTransaction(callback : ${callback})`);         
+    // debugger;  
+
     try {
       // 트랜잭션 깊이 추적
       if (!this.transactionDepth) {
@@ -1693,12 +1784,15 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _getBestPosition(context, elementId) {
-    console.log(`[POSITION_TRACK] Getting best position for ${elementId}`);
-    console.log(`[POSITION_TRACK] - pendingDropPosition:`, this.pendingDropPosition);
-    console.log(`[POSITION_TRACK] - context.position:`, context.position);
-    console.log(`[POSITION_TRACK] - context.target:`, context.target);
-    console.log(`[POSITION_TRACK] - awarenessUI.localCursor:`, this.awarenessUI?.localCursor);
-    console.log(`[POSITION_TRACK] - lastMousePosition:`, this.lastMousePosition);
+    console.log(`[FUNC] _getBestPosition(context : ${context}, elementId : ${elementId})`);         
+    // debugger;  
+
+    // console.log(`[POSITION_TRACK] Getting best position for ${elementId}`);
+    // console.log(`[POSITION_TRACK] - pendingDropPosition:`, this.pendingDropPosition);
+    // console.log(`[POSITION_TRACK] - context.position:`, context.position);
+    // console.log(`[POSITION_TRACK] - context.target:`, context.target);
+    // console.log(`[POSITION_TRACK] - awarenessUI.localCursor:`, this.awarenessUI?.localCursor);
+    // console.log(`[POSITION_TRACK] - lastMousePosition:`, this.lastMousePosition);
     
     // 우선순위대로 위치 정보 선택
     if (this.pendingDropPosition && this.pendingDropPosition.x !== undefined && this.pendingDropPosition.y !== undefined) {
