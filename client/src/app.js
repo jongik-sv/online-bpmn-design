@@ -258,6 +258,11 @@ class BpmnCollaborationEditor {
         showUserList: true,
         showActivityFeed: true
       });
+      
+      // BpmnSyncManager에 AwarenessUI 연결 (위치 추적 개선을 위해)
+      if (this.bpmnSyncManager) {
+        this.bpmnSyncManager.setAwarenessUI(this.awarenessUI);
+      }
     }
     
     // 협업 제어 패널 초기화

@@ -1,9 +1,29 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find:*)",
-      "Bash(grep:*)"
-    ],
-    "deny": []
-  }
+      "Bash(npm start)",
+      "Bash(taskkill:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(tasklist)",
+      "Bash(npm run dev:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(git add:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "supabase",
+    "sequential-thinking",
+    "google-calendar",
+    "Context7",
+    "mongodb"
+  ],
+  "disabledMcpjsonServers": [
+    "supabase",
+    "sequential-thinking",
+    "Context7",
+    "mongodb"
+  ]
 }

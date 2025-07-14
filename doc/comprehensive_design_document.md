@@ -560,4 +560,61 @@ C:\Project\online_bpmn_design\
 
 
 
-DB_URL=mongodb://210.1.1.40:27017/bpmn?directConnection=true
+테스트 : DB_URL=mongodb://210.1.1.40:27017/bpmn?directConnection=true
+현재 : DB_URL=mongodb://localhost:27017/bpmn?directConnection=true
+
+
+
+  데이터 저장 시점 (Insert/Save)
+
+  1. 협업 세션 생성 시
+
+  - 위치: server/src/services/SessionService.js:73-91
+  - 데이터: 새 협업 세션 정보 (참가자, 설정, 통계)
+  - 컬렉션: collaboration_sessions
+
+  2. BPMN 문서 상태 저장 시
+
+  - 위치: server/src/services/PersistenceService.js:137-145
+  - 데이터: Y.js 문서 상태, 상태 벡터, 엘리먼트 수
+  - 컬렉션: yjs_documents
+
+  3. 실시간 편집 업데이트 시
+
+  - 위치: server/src/services/PersistenceService.js:175
+  - 데이터: Y.js 증분 업데이트, 클라이언트 ID
+  - 컬렉션: yjs_documents.updates
+
+  4. 댓글 작성 시
+
+  - 위치: server/src/server.js:333-334
+  - 데이터: 댓글 내용, 엘리먼트 ID, 작성자 정보
+  - 컬렉션: collaboration_comments
+
+  데이터 조회 시점 (Query/Find)
+
+  1. 협업 세션 로드 시
+
+  - 위치: server/src/services/SessionService.js:63
+  - 용도: 활성 세션 확인 및 참가자 정보 로드
+  - 컬렉션: collaboration_sessions
+
+  2. 문서 열기 시
+
+  - 위치: server/src/services/PersistenceService.js:97
+  - 용도: Y.js 문서 상태 및 업데이트 히스토리 로드
+  - 컬렉션: yjs_documents
+
+  3. 댓글 조회 시
+
+  - 위치: server/src/server.js:304-320
+  - 용도: 문서별/엘리먼트별 댓글 목록 조회
+  - 컬렉션: collaboration_comments
+
+  주요 컬렉션
+
+  1. collaboration_sessions: 협업 세션 관리
+  2. yjs_documents: BPMN 문서 상태 (Y.js CRDT)
+  3. collaboration_comments: 엘리먼트별 댓글
+
+  MongoDB 연결: mongodb://210.1.1.40:27017/bpmn_collaboration

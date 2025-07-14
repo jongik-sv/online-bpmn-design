@@ -90,3 +90,6 @@ jspm_packages/
 
 # DynamoDB Local files
 .dynamodb/
+
+# YoYo AI version control directory
+.yoyo/

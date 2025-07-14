@@ -42,6 +42,12 @@ export class BpmnSyncManager extends EventEmitter {
     this.errorCooldown = 1000;              // 에러 쿨다운 (1초)
     this._isAppendingShape = false;         // shape.append 처리 중 플래그
     
+    // 위치 추적 관련 상태
+    this.pendingDropPosition = null;        // 대기 중인 드롭 위치 정보
+    this.lastMousePosition = null;          // 마지막 마우스 위치
+    this.dragStartPosition = null;          // 드래그 시작 위치
+    this.isTracking = false;                // 위치 추적 활성화 플래그
+    
     // BPMN.js 서비스 참조
     this.elementRegistry = modeler.get('elementRegistry');
     this.modeling = modeler.get('modeling');
@@ -89,6 +95,17 @@ export class BpmnSyncManager extends EventEmitter {
     
     // 다이어그램 임포트 이벤트
     this.eventBus.on('import.done', this._handleImportDone.bind(this));
+    
+    // 위치 추적을 위한 추가 이벤트 리스너
+    this.eventBus.on('create.start', this._handleCreateStart.bind(this));
+    this.eventBus.on('create.move', this._handleCreateMove.bind(this));
+    this.eventBus.on('create.end', this._handleCreateEnd.bind(this));
+    this.eventBus.on('drag.start', this._handleDragStart.bind(this));
+    this.eventBus.on('drag.move', this._handleDragMove.bind(this));
+    this.eventBus.on('drag.end', this._handleDragEnd.bind(this));
+    
+    // 마우스 이벤트 직접 캡처 (더 정확한 위치 추적)
+    this._setupMouseTracking();
   }
   
   /**
@@ -168,29 +185,30 @@ export class BpmnSyncManager extends EventEmitter {
       // 트랜잭션 시작
       this.syncTransactionId = uuidv4();
       
+      // 기본 컨텍스트 검증
+      if (!context) {
+        console.warn(`[BPMN] No context provided for command: ${command}`);
+        return;
+      }
+      
       // 커맨드에 따른 Y.js 업데이트 생성
       switch (command) {
         case 'shape.create':
           // shape.append가 호출될 예정이면 무시 (중복 방지)
           if (!this._isAppendingShape) {
-            // shape.append의 일부일 수 있는지 확인 (undefined 좌표나 기본 위치인 경우)
-            // parent가 있고 좌표가 undefined인 경우는 거의 확실히 shape.append의 일부
+            // shape.append의 일부일 수 있는지 확인 (더 강화된 조건)
             const hasParent = context.shape && context.shape.parent;
             const hasUndefinedCoords = context.shape && (context.shape.x === undefined || context.shape.y === undefined);
-            const isLikelyAppendOperation = hasParent && hasUndefinedCoords;
+            const hasContextPosition = context.position && context.position.x !== undefined && context.position.y !== undefined;
+            
+            // shape.append가 발생할 가능성이 높은 경우: parent가 있고 (좌표가 undefined이거나 context에 position이 있음)
+            const isLikelyAppendOperation = hasParent && (hasUndefinedCoords || hasContextPosition);
             
             if (isLikelyAppendOperation) {
-              console.log(`[POSITION] Detected potential shape.append operation for ${context.shape.id} (x=${context.shape.x}, y=${context.shape.y}) - delaying sync`);
+              console.log(`[POSITION] 🚫 SKIPPING shape.create for ${context.shape.id} - will handle in shape.append (parent=${!!hasParent}, hasContext=${hasContextPosition})`);
               
-              // 짧은 지연 후 shape.append가 없으면 sync 수행
-              setTimeout(() => {
-                if (!this._isAppendingShape) {
-                  console.log(`[POSITION] No shape.append detected, proceeding with delayed shape.create for ${context.shape.id}`);
-                  this._syncShapeCreate(context);
-                } else {
-                  console.log(`[POSITION] Shape.append in progress, skipping delayed shape.create for ${context.shape.id}`);
-                }
-              }, 20); // 20ms 지연으로 shape.append 이벤트를 기다림
+              // shape.append에서 처리할 예정이므로 shape.create는 완전히 스킵
+              // Y.js에 저장하지 않음 - shape.append에서만 저장
             } else {
               console.log(`[POSITION] Direct shape.create - proceeding immediately (parent=${!!hasParent}, coords=${context.shape?.x},${context.shape?.y})`);
               this._syncShapeCreate(context);
@@ -205,7 +223,11 @@ export class BpmnSyncManager extends EventEmitter {
           break;
           
         case 'shape.move':
-          this._syncShapeMove(context);
+          if (context && (context.shapes || context.shape)) {
+            this._syncShapeMove(context);
+          } else {
+            console.warn(`[POSITION] Invalid move context - no shapes found:`, context);
+          }
           break;
           
         case 'shape.resize':
@@ -281,7 +303,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeCreate(context) {
-    const { shape } = context;
+    const { shape, position } = context;
     
     // 이미 Y.js에 존재하는 요소인지 확인 (중복 생성 방지)
     const existingElement = this.yjsDocManager.getElement(shape.id);
@@ -290,20 +312,25 @@ export class BpmnSyncManager extends EventEmitter {
       return;
     }
     
-    console.log(`[POSITION] Local shape created: ${shape.id} at x=${shape.x}, y=${shape.y}`);
+    console.log(`[POSITION] 🔵 Local shape created: ${shape.id} at x=${shape.x}, y=${shape.y}`);
     
-    // shape.append에서 호출된 경우 실제 shape 좌표를 확인
-    if (this._isAppendingShape && (shape.x === undefined || shape.x === 100)) {
-      console.log(`[POSITION] Shape create during append - coordinates may be temporary`);
-    }
+    // shape.append가 뒤따를 가능성이 높은 경우 Y.js 동기화를 완전히 차단
+    const hasParent = shape.parent && shape.parent.id && shape.parent.id !== '__implicitroot';
+    const hasDefaultCoords = (shape.x === 100 && shape.y === 100) || (shape.x === undefined || shape.y === undefined);
+    const hasContextPosition = position && position.x !== undefined && position.y !== undefined;
     
-    // 기본 위치 (100, 100)인 경우 shape.append의 올바른 위치를 기다릴 수 있도록 추가 검증
-    if (shape.x === 100 && shape.y === 100 && shape.parent) {
-      console.log(`[POSITION] Warning: Creating shape with default position (100,100). This may be updated by shape.append.`);
+    // shape.append에서 정확한 위치가 전달될 가능성이 높은 경우 Y.js 동기화 차단
+    const isLikelyAppendOperation = hasParent && (hasDefaultCoords || hasContextPosition);
+    
+    if (isLikelyAppendOperation) {
+      console.log(`[POSITION] 🚫 BLOCKING Y.js sync for ${shape.id} - shape.append will follow with correct position`);
+      console.log(`[POSITION] 🚫 Reason: hasParent=${hasParent}, hasDefaultCoords=${hasDefaultCoords}, hasContextPosition=${hasContextPosition}`);
+      // Y.js 동기화를 완전히 차단하고 shape.append에서만 처리하도록 함
+      return;
     }
     
     const elementData = this._extractElementData(shape);
-    console.log(`[POSITION] Extracted element data: ${shape.id} at x=${elementData.x}, y=${elementData.y}`);
+    console.log(`[POSITION] 📤 Proceeding with Y.js sync: ${shape.id} at x=${elementData.x}, y=${elementData.y}`);
     
     this._log(`Syncing shape create: ${shape.id} (${shape.type})`, 'info');
     
@@ -366,22 +393,35 @@ export class BpmnSyncManager extends EventEmitter {
   _syncShapeAppend(context) {
     const { shape, source, connection } = context;
     
-    // 위치 정보가 누락된 경우 기본값 설정
-    if (shape.x === undefined || shape.y === undefined) {
-      // source 요소 기준으로 위치 계산
+    // 개선된 위치 결정 로직 사용
+    console.log(`[POSITION] Starting shape.append for ${shape.id}`);
+    console.log(`[POSITION] Original shape position: x=${shape.x}, y=${shape.y}`);
+    
+    // 최적 위치 정보 가져오기
+    const bestPosition = this._getBestPosition(context, shape.id);
+    
+    if (bestPosition) {
+      shape.x = bestPosition.x;
+      shape.y = bestPosition.y;
+      console.log(`[POSITION] ✅ Applied best position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
+    } else if (shape.x === undefined || shape.y === undefined) {
+      // fallback: source 기준 계산 또는 기본값
       if (source && source.x !== undefined && source.y !== undefined) {
         shape.x = source.x + 150; // source 오른쪽에 배치
         shape.y = source.y;
-        console.log(`[POSITION] Fixed undefined position for ${shape.id}: x=${shape.x}, y=${shape.y} (calculated from source)`);
+        console.log(`[POSITION] Fallback to source-based position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
       } else {
-        // 기본 위치 설정
+        // 최후 기본 위치
         shape.x = 240;
         shape.y = 60;
-        console.log(`[POSITION] Fixed undefined position for ${shape.id}: x=${shape.x}, y=${shape.y} (default)`);
+        console.log(`[POSITION] Fallback to default position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
       }
+    } else {
+      console.log(`[POSITION] Keeping original position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
     }
     
     console.log(`[POSITION] Shape append: ${shape.id} at x=${shape.x}, y=${shape.y} from source ${source?.id}`);
+    console.log(`[DEBUG] Full context:`, JSON.stringify(context, null, 2));
     this._log(`Syncing shape append: ${shape.id} from ${source?.id}`, 'info');
     this._log(`Shape append context:`, 'debug', context);
     
@@ -398,11 +438,9 @@ export class BpmnSyncManager extends EventEmitter {
           if (yElement) {
             yElement.set('x', shape.x);
             yElement.set('y', shape.y);
-            console.log(`[POSITION] Y.js position updated: ${shape.id} to x=${shape.x}, y=${shape.y}`);
-            
             // 업데이트 후 검증
             const verifyData = yElement.toJSON();
-            console.log(`[POSITION] Y.js verification: ${shape.id} stored as x=${verifyData.x}, y=${verifyData.y}`);
+            console.log(`[POSITION] 💾 Y.js updated & verified: ${shape.id} stored as x=${verifyData.x}, y=${verifyData.y}`);
           }
         }, 'position-update'); // 다른 origin 사용하여 명확한 구분
       } else {
@@ -423,9 +461,16 @@ export class BpmnSyncManager extends EventEmitter {
             // 새로운 요소 생성
             const elementData = this._extractElementData(shape);
             
-            // 올바른 위치 정보로 덮어쓰기
-            elementData.x = shape.x;
-            elementData.y = shape.y;
+            // 위치 정보 강화 - 확실한 위치 보장
+            if (typeof shape.x === 'number' && !isNaN(shape.x) &&
+                typeof shape.y === 'number' && !isNaN(shape.y)) {
+              elementData.x = shape.x;
+              elementData.y = shape.y;
+              console.log(`[POSITION] Using confirmed position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
+            } else {
+              console.error(`[POSITION] Invalid position for ${shape.id}: x=${shape.x}, y=${shape.y} - this should not happen!`);
+              // 이 경우는 발생하면 안 되므로 에러 로그
+            }
             
             const yElement = new Y.Map();
             Object.entries(elementData).forEach(([key, value]) => {
@@ -435,12 +480,19 @@ export class BpmnSyncManager extends EventEmitter {
             });
             
             yElements.set(shape.id, yElement);
-            console.log(`[POSITION] Created element ${shape.id} with correct position x=${shape.x}, y=${shape.y}`);
+            console.log(`[POSITION] Stored element ${shape.id} in Y.js with position x=${elementData.x}, y=${elementData.y}`);
             
             // 트랜잭션 완료 후 검증
             const storedElement = yElements.get(shape.id);
             const storedData = storedElement.toJSON();
             console.log(`[POSITION] Y.js storage verification: ${shape.id} stored as x=${storedData.x}, y=${storedData.y}`);
+            
+            // 위치 정보가 올바르게 저장되었는지 강력한 검증
+            if (storedData.x !== elementData.x || storedData.y !== elementData.y) {
+              console.error(`[POSITION] Y.js storage MISMATCH! Expected x=${elementData.x}, y=${elementData.y} but got x=${storedData.x}, y=${storedData.y}`);
+            } else {
+              console.log(`[POSITION] Y.js storage SUCCESS: Position correctly stored for ${shape.id}`);
+            }
           }
         }, 'shape-append-create');
       }
@@ -538,16 +590,35 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeMove(context) {
-    const { shapes, delta } = context;
+    let { shapes, delta, shape } = context;
+    
+    // 단일 shape을 배열로 변환
+    if (!shapes && shape) {
+      shapes = [shape];
+    }
+    
+    // shapes가 배열인지 확인
+    if (!shapes || !Array.isArray(shapes)) {
+      console.warn(`[POSITION] Invalid shapes in move context:`, shapes);
+      console.warn(`[POSITION] Full move context:`, context);
+      return;
+    }
+    
+    console.log(`[POSITION] Moving ${shapes.length} shapes with delta dx=${delta?.x}, dy=${delta?.y}`);
     
     // 배치 업데이트를 위해 변경사항 수집
     shapes.forEach(shape => {
-      this.pendingLocalChanges.set(shape.id, {
-        type: 'move',
-        x: shape.x,
-        y: shape.y,
-        timestamp: Date.now()
-      });
+      if (shape && shape.id) {
+        console.log(`[POSITION] Recording move for ${shape.id}: x=${shape.x}, y=${shape.y}`);
+        this.pendingLocalChanges.set(shape.id, {
+          type: 'move',
+          x: shape.x,
+          y: shape.y,
+          timestamp: Date.now()
+        });
+      } else {
+        console.warn(`[POSITION] Invalid shape in move operation:`, shape);
+      }
     });
   }
   
@@ -799,6 +870,7 @@ export class BpmnSyncManager extends EventEmitter {
         } else if (change.action === 'delete') {
           this._applyRemoteElementDelete(key);
         } else if (change.action === 'update') {
+          console.log(`[POSITION] Y.js update detected for ${key}`);
           this._applyRemoteElementUpdate(key);
         }
       });
@@ -1049,19 +1121,26 @@ export class BpmnSyncManager extends EventEmitter {
     const businessObject = element.businessObject || {};
     const di = element.di || {};
     
-    // 위치 정보 검증 및 기본값 설정
+    // 위치 정보 검증 - 유효한 값이 있으면 보존, 없으면 기본값
     let x = element.x;
     let y = element.y;
     
-    if (typeof x !== 'number' || isNaN(x)) {
+    // 위치가 유효한지 확인 - 0도 유효한 위치임!
+    const isValidX = typeof x === 'number' && !isNaN(x);
+    const isValidY = typeof y === 'number' && !isNaN(y);
+    
+    if (!isValidX) {
       x = 100; // 기본 x 좌표
-      console.log(`[POSITION] Fixed invalid x coordinate for ${element.id}: ${element.x} -> ${x}`);
+      console.log(`[POSITION] ⚠️ Invalid x for ${element.id}: ${element.x} -> ${x}`);
     }
     
-    if (typeof y !== 'number' || isNaN(y)) {
+    if (!isValidY) {
       y = 100; // 기본 y 좌표  
-      console.log(`[POSITION] Fixed invalid y coordinate for ${element.id}: ${element.y} -> ${y}`);
+      console.log(`[POSITION] ⚠️ Invalid y for ${element.id}: ${element.y} -> ${y}`);
     }
+    
+    // 최종 결과만 로그
+    console.log(`[POSITION] 📦 Extract result for ${element.id}: x=${x}, y=${y}`);
     
     return {
       id: element.id,
@@ -1175,61 +1254,85 @@ export class BpmnSyncManager extends EventEmitter {
       const bpmnFactory = this.modeler.get('bpmnFactory');
       const elementFactory = this.modeler.get('elementFactory');
       
-      // 비즈니스 객체 생성
-      const bpmnBusinessObject = this._createBusinessObject(businessObject);
+      // 더 간단하고 안전한 비즈니스 객체 생성
+      let safeType = type;
+      if (!safeType || !safeType.startsWith('bpmn:')) {
+        safeType = 'bpmn:Task';
+      }
       
-      // 요소 생성을 위한 속성 정의
-      const elementAttrs = {
+      console.log(`[POSITION] Creating businessObject for type: ${safeType}`);
+      const bpmnBusinessObject = bpmnFactory.create(safeType, {
+        id: elementId,
+        name: businessObject?.name || ''
+      });
+      
+      console.log(`[POSITION] BusinessObject created:`, bpmnBusinessObject);
+      
+      // BusinessObject 유효성 검증
+      if (!bpmnBusinessObject || !bpmnBusinessObject.$type) {
+        console.error(`[POSITION] Invalid businessObject created for ${elementId}`);
+        throw new Error(`Failed to create valid businessObject for ${elementId}`);
+      }
+      
+      // Y.js에서 최신 위치 정보 먼저 확인 (BPMN.js 공식 방식 적용 전에)
+      const latestYElement = this.yjsDocManager.getElement(elementId);
+      const latestData = latestYElement ? latestYElement.toJSON() : elementData;
+      
+      // 더 강화된 위치 정보 결정 로직
+      let finalX = 100, finalY = 100; // 기본값
+      
+      // 1순위: 최신 Y.js 데이터에서 유효한 위치
+      if (latestData.x !== undefined && latestData.y !== undefined && 
+          typeof latestData.x === 'number' && typeof latestData.y === 'number' &&
+          !isNaN(latestData.x) && !isNaN(latestData.y)) {
+        finalX = latestData.x;
+        finalY = latestData.y;
+        console.log(`[POSITION] 📥 Remote using Y.js position for ${elementId}: x=${finalX}, y=${finalY}`);
+      }
+      // 2순위: 전달받은 elementData에서 유효한 위치
+      else if (x !== undefined && y !== undefined && 
+               typeof x === 'number' && typeof y === 'number' &&
+               !isNaN(x) && !isNaN(y)) {
+        finalX = x;
+        finalY = y;
+        console.log(`[POSITION] Using elementData position for ${elementId}: x=${finalX}, y=${finalY}`);
+      }
+      // 3순위: 기본값 사용 (하지만 경고 출력)
+      else {
+        console.warn(`[POSITION] No valid position found for ${elementId}, using default: x=${finalX}, y=${finalY}`);
+        console.warn(`[POSITION] Debug - latestData:`, latestData);
+        console.warn(`[POSITION] Debug - original x=${x}, y=${y}`);
+      }
+
+      // ElementFactory로 기본 shape 생성 (위치 포함) - 이미 위에서 선언됨
+      const baseShape = elementFactory.createShape({
         id: elementId,
         type: type,
         businessObject: bpmnBusinessObject,
-        width: width || 100,
-        height: height || 80
-      };
+        x: finalX,
+        y: finalY,
+        width: width || (type.includes('Event') ? 36 : type.includes('Gateway') ? 50 : 100),
+        height: height || (type.includes('Event') ? 36 : type.includes('Gateway') ? 50 : 80)
+      });
       
-      // BPMN 요소 타입에 따른 기본 크기 설정
-      if (type === 'bpmn:Task' || type === 'bpmn:UserTask' || type === 'bpmn:ServiceTask') {
-        elementAttrs.width = width || 100;
-        elementAttrs.height = height || 80;
-      } else if (type === 'bpmn:StartEvent' || type === 'bpmn:EndEvent') {
-        elementAttrs.width = width || 36;
-        elementAttrs.height = height || 36;
-      } else if (type === 'bpmn:Gateway' || type === 'bpmn:ExclusiveGateway') {
-        elementAttrs.width = width || 50;
-        elementAttrs.height = height || 50;
-      }
-      
-      // ElementFactory를 사용해서 요소 생성
-      const element = elementFactory.createShape(elementAttrs);
+      console.log(`[POSITION] ElementFactory created baseShape:`, baseShape);
       
       // 부모 요소 결정
       const parentElement = parent ? 
         this.elementRegistry.get(parent) : 
         this.modeler.get('canvas').getRootElement();
       
-      // Y.js에서 최신 위치 정보 다시 확인
-      const latestYElement = this.yjsDocManager.getElement(elementId);
-      const latestData = latestYElement ? latestYElement.toJSON() : elementData;
-      
-      // 최신 위치 정보 사용
-      let position = { 
-        x: typeof latestData.x === 'number' ? latestData.x : (typeof x === 'number' ? x : 100), 
-        y: typeof latestData.y === 'number' ? latestData.y : (typeof y === 'number' ? y : 100)
-      };
-      
-      // 위치 정보 로그 (디버깅용)
-      console.log(`[POSITION] Creating remote shape ${elementId} at position: x=${position.x}, y=${position.y}`);
-      console.log(`[POSITION] Original data: x=${x}, y=${y}, Latest data: x=${latestData.x}, y=${latestData.y}`);
-      
       // 원격 변경 적용 중 플래그 설정 (무한 루프 방지)
       this.isApplyingRemoteChanges = true;
       
       try {
-        // 모델링 서비스를 사용해서 캔버스에 추가
+        // BPMN.js ElementFactory + Modeling 조합으로 안전한 생성
+        console.log(`[POSITION] Creating shape with ElementFactory + Modeling: ${elementId} at x=${finalX}, y=${finalY}`);
+        
         const shape = this.modeling.createShape(
-          element,
-          position,
-          parentElement
+          baseShape,      // 🎯 ElementFactory로 생성된 완전한 shape
+          { x: finalX, y: finalY },  // 🎯 위치 명시적 지정
+          parentElement   
         );
         
         return shape;
@@ -1553,16 +1656,218 @@ export class BpmnSyncManager extends EventEmitter {
   }
   
   /**
+   * 마우스 추적 설정
+   * @private
+   */
+  _setupMouseTracking() {
+    const canvas = this.modeler.get('canvas');
+    const container = canvas.getContainer();
+    
+    if (container) {
+      container.addEventListener('mousemove', this._handleMouseMove.bind(this));
+      container.addEventListener('mousedown', this._handleMouseDown.bind(this));
+      container.addEventListener('mouseup', this._handleMouseUp.bind(this));
+    }
+  }
+  
+  /**
+   * 마우스 이동 핸들러
+   * @private
+   */
+  _handleMouseMove(event) {
+    const canvas = this.modeler.get('canvas');
+    const rect = canvas.getContainer().getBoundingClientRect();
+    const viewbox = canvas.viewbox();
+    
+    // 캔버스 좌표계로 변환
+    const x = viewbox.x + (event.clientX - rect.left) * viewbox.width / rect.width;
+    const y = viewbox.y + (event.clientY - rect.top) * viewbox.height / rect.height;
+    
+    this.lastMousePosition = { x, y };
+    
+    if (this.isTracking) {
+      this.pendingDropPosition = { x, y };
+      console.log(`[POSITION_TRACK] Mouse position updated: x=${x}, y=${y}`);
+    }
+  }
+  
+  /**
+   * 마우스 다운 핸들러
+   * @private
+   */
+  _handleMouseDown(event) {
+    this.dragStartPosition = this.lastMousePosition ? { ...this.lastMousePosition } : null;
+    console.log(`[POSITION_TRACK] Mouse down at:`, this.dragStartPosition);
+  }
+  
+  /**
+   * 마우스 업 핸들러
+   * @private
+   */
+  _handleMouseUp(event) {
+    // 드래그가 끝났을 때 위치 정보를 확정
+    if (this.isTracking && this.lastMousePosition) {
+      this.pendingDropPosition = { ...this.lastMousePosition };
+      console.log(`[POSITION_TRACK] Final drop position:`, this.pendingDropPosition);
+    }
+  }
+  
+  /**
+   * Create 시작 이벤트 핸들러
+   * @private
+   */
+  _handleCreateStart(event) {
+    this.isTracking = true;
+    this.pendingDropPosition = null;
+    console.log(`[POSITION_TRACK] Create started, enabling position tracking`);
+  }
+  
+  /**
+   * Create 이동 이벤트 핸들러
+   * @private
+   */
+  _handleCreateMove(event) {
+    if (event.context && event.context.x !== undefined && event.context.y !== undefined) {
+      this.pendingDropPosition = { x: event.context.x, y: event.context.y };
+      console.log(`[POSITION_TRACK] Create move position: x=${event.context.x}, y=${event.context.y}`);
+    }
+  }
+  
+  /**
+   * Create 종료 이벤트 핸들러
+   * @private
+   */
+  _handleCreateEnd(event) {
+    if (event.context && event.context.x !== undefined && event.context.y !== undefined) {
+      this.pendingDropPosition = { x: event.context.x, y: event.context.y };
+      console.log(`[POSITION_TRACK] Create end position: x=${event.context.x}, y=${event.context.y}`);
+    }
+    
+    // 짧은 지연 후 추적 비활성화 (shape.append가 처리될 시간을 줌)
+    setTimeout(() => {
+      this.isTracking = false;
+      console.log(`[POSITION_TRACK] Position tracking disabled`);
+    }, 50);
+  }
+  
+  /**
+   * 드래그 시작 이벤트 핸들러
+   * @private
+   */
+  _handleDragStart(event) {
+    this.isTracking = true;
+    console.log(`[POSITION_TRACK] Drag started, enabling position tracking`);
+  }
+  
+  /**
+   * 드래그 이동 이벤트 핸들러
+   * @private
+   */
+  _handleDragMove(event) {
+    if (event.x !== undefined && event.y !== undefined) {
+      this.pendingDropPosition = { x: event.x, y: event.y };
+      console.log(`[POSITION_TRACK] Drag move position: x=${event.x}, y=${event.y}`);
+    }
+  }
+  
+  /**
+   * 드래그 종료 이벤트 핸들러
+   * @private
+   */
+  _handleDragEnd(event) {
+    if (event.x !== undefined && event.y !== undefined) {
+      this.pendingDropPosition = { x: event.x, y: event.y };
+      console.log(`[POSITION_TRACK] Drag end position: x=${event.x}, y=${event.y}`);
+    }
+    
+    // 짧은 지연 후 추적 비활성화
+    setTimeout(() => {
+      this.isTracking = false;
+      this.pendingDropPosition = null;
+      console.log(`[POSITION_TRACK] Position tracking disabled`);
+    }, 50);
+  }
+  
+  /**
+   * AwarenessUI 연결 (app.js에서 호출됨)
+   * @public
+   */
+  setAwarenessUI(awarenessUI) {
+    this.awarenessUI = awarenessUI;
+    console.log(`[POSITION_TRACK] AwarenessUI connected to BpmnSyncManager`);
+  }
+  
+  /**
+   * 최적 위치 정보 가져오기
+   * @private
+   */
+  _getBestPosition(context, elementId) {
+    console.log(`[POSITION_TRACK] Getting best position for ${elementId}`);
+    console.log(`[POSITION_TRACK] - pendingDropPosition:`, this.pendingDropPosition);
+    console.log(`[POSITION_TRACK] - context.position:`, context.position);
+    console.log(`[POSITION_TRACK] - context.target:`, context.target);
+    console.log(`[POSITION_TRACK] - awarenessUI.localCursor:`, this.awarenessUI?.localCursor);
+    console.log(`[POSITION_TRACK] - lastMousePosition:`, this.lastMousePosition);
+    
+    // 우선순위대로 위치 정보 선택
+    if (this.pendingDropPosition && this.pendingDropPosition.x !== undefined && this.pendingDropPosition.y !== undefined) {
+      console.log(`[POSITION_TRACK] Using pendingDropPosition: x=${this.pendingDropPosition.x}, y=${this.pendingDropPosition.y}`);
+      return this.pendingDropPosition;
+    }
+    
+    if (context.position && context.position.x !== undefined && context.position.y !== undefined) {
+      console.log(`[POSITION_TRACK] Using context.position: x=${context.position.x}, y=${context.position.y}`);
+      return context.position;
+    }
+    
+    if (context.target && context.target.x !== undefined && context.target.y !== undefined) {
+      console.log(`[POSITION_TRACK] Using context.target: x=${context.target.x}, y=${context.target.y}`);
+      return context.target;
+    }
+    
+    if (this.awarenessUI && this.awarenessUI.localCursor && 
+        this.awarenessUI.localCursor.x !== undefined && this.awarenessUI.localCursor.y !== undefined) {
+      console.log(`[POSITION_TRACK] Using awarenessUI.localCursor: x=${this.awarenessUI.localCursor.x}, y=${this.awarenessUI.localCursor.y}`);
+      return this.awarenessUI.localCursor;
+    }
+    
+    if (this.lastMousePosition && this.lastMousePosition.x !== undefined && this.lastMousePosition.y !== undefined) {
+      console.log(`[POSITION_TRACK] Using lastMousePosition: x=${this.lastMousePosition.x}, y=${this.lastMousePosition.y}`);
+      return this.lastMousePosition;
+    }
+    
+    console.log(`[POSITION_TRACK] No reliable position found, returning null`);
+    return null;
+  }
+
+  /**
    * 리소스 정리
    * @public
    */
   destroy() {
-    // 이벤트 리스너 정리
+    // 기본 이벤트 리스너 정리
     this.eventBus.off('commandStack.execute', this._handleBpmnCommand);
     this.eventBus.off('commandStack.revert', this._handleBpmnCommand);
     this.eventBus.off('elements.changed', this._handleElementsChanged);
     this.eventBus.off('selection.changed', this._handleSelectionChanged);
     this.eventBus.off('import.done', this._handleImportDone);
+    
+    // 위치 추적 이벤트 리스너 정리
+    this.eventBus.off('create.start', this._handleCreateStart);
+    this.eventBus.off('create.move', this._handleCreateMove);
+    this.eventBus.off('create.end', this._handleCreateEnd);
+    this.eventBus.off('drag.start', this._handleDragStart);
+    this.eventBus.off('drag.move', this._handleDragMove);
+    this.eventBus.off('drag.end', this._handleDragEnd);
+    
+    // 마우스 이벤트 리스너 정리
+    const canvas = this.modeler.get('canvas');
+    const container = canvas.getContainer();
+    if (container) {
+      container.removeEventListener('mousemove', this._handleMouseMove);
+      container.removeEventListener('mousedown', this._handleMouseDown);
+      container.removeEventListener('mouseup', this._handleMouseUp);
+    }
     
     // 배치 프로세서 정리
     if (this.batchUpdateInterval) {

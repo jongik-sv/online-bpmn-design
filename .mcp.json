@@ -1,0 +1,45 @@
+{
+  "mcpServers": {
+    "supabase": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--project-ref=yigkpwxaemgcasxtopup"
+      ],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "sbp_b6dc12f28750977c5a939f8ccc0dc6a34f49ec5d"
+      }
+    },
+    "sequential-thinking": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "Context7": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "mongodb": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "mcp-mongo-server",
+        "mongodb://127.0.0.1:27017/bpmn"
+      ]
+    }
+  }
+}
