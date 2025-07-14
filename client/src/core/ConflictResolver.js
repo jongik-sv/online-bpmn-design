@@ -16,12 +16,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
 
 export class ConflictResolver extends EventEmitter {
-  constructor(bpmnModeler, yjsDocManager, options = {}) {
+  constructor(bpmnModeler, yjsDocManager, clientId, options = {}) {
     super();
     
     // 의존성 주입
     this.modeler = bpmnModeler;
     this.yjsDocManager = yjsDocManager;
+    this.clientId = clientId;
     
     // 설정 옵션
     this.options = {
@@ -115,8 +116,8 @@ export class ConflictResolver extends EventEmitter {
     
     // 요소 변경 감지
     yElements.observeDeep((events, transaction) => {
-      // 로컬 변경은 무시
-      if (transaction.origin === 'local') return;
+      // 자신의 변경은 무시
+      if (transaction.origin === this.clientId) return;
       
       events.forEach(event => {
         if (event.path.length > 0) {

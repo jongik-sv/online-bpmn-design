@@ -788,8 +788,8 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleYjsDeepChanges(events, transaction) {
-    // 로컬 변경인 경우 무시 (동기화 루프 방지)
-    if (transaction.origin === 'local') {
+    // 자신의 변경인 경우 무시 (동기화 루프 방지)
+    if (transaction.origin === this.clientId) {
       return;
     }
     

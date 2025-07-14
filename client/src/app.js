@@ -216,6 +216,7 @@ class BpmnCollaborationEditor {
       this.conflictResolver = new ConflictResolver(
         this.modeler,
         this.yjsDocumentManager,
+        this.bpmnSyncManager.clientId,  // BpmnSyncManager의 clientId 전달
         {
           enableAutoResolution: true,
           semanticValidation: true
