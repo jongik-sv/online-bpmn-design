@@ -39,6 +39,7 @@ export class BpmnSyncManager extends EventEmitter {
     // 상태 관리
     this.isApplyingRemoteChanges = false;  // 원격 변경 적용 중 플래그
     this.pendingLocalChanges = new Map();   // 대기 중인 로컬 변경사항
+    this.isRealtimeSyncEnabled = true;      // 실시간 동기화 활성화 플래그
     this.syncTransactionId = null;          // 현재 동기화 트랜잭션 ID
     this.processingCommands = new Set();    // 현재 처리 중인 명령어들 (재귀 방지)
     this.syncCallDepth = 0;                 // 동기화 호출 깊이
@@ -161,16 +162,13 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleBpmnCommand(event) {
-    // 원격 변경 적용 중이면 무시
-    if (this.isApplyingRemoteChanges) {
-      this._log(`Skipping BPMN command ${event.command} - applying remote changes`, 'debug');
-      return;
-    }
+    console.log(`[FUNC] _handleBpmnCommand(${event.command})`);
     
-    // 재귀 호출 방지
+    if (this.isApplyingRemoteChanges) return;
+    if (!this.isRealtimeSyncEnabled) return;
+    
     this.syncCallDepth++;
     if (this.syncCallDepth > 10) {
-      this._log(`Max sync call depth exceeded (${this.syncCallDepth}), aborting`, 'warn');
       this.syncCallDepth--;
       return;
     }
@@ -200,32 +198,16 @@ export class BpmnSyncManager extends EventEmitter {
       // 커맨드에 따른 Y.js 업데이트 생성
       switch (command) {
         case 'shape.create':
-          // shape.append가 호출될 예정이면 무시 (중복 방지)
           if (!this._isAppendingShape) {
-            // shape.append의 일부일 수 있는지 확인 (강화된 조건)
             const hasValidParent = context.shape && context.shape.parent && 
                                  context.shape.parent.id && 
                                  context.shape.parent.id !== '__implicitroot';
-            const hasUndefinedCoords = context.shape && (context.shape.x === undefined || context.shape.y === undefined);
             const hasContextPosition = context.position && context.position.x !== undefined && context.position.y !== undefined;
-            
-            console.log(`[POSITION] Shape.create analysis for ${context.shape?.id}:`);
-            console.log(`[POSITION] - hasValidParent: ${hasValidParent} (parent: ${context.shape?.parent?.id})`);
-            console.log(`[POSITION] - hasUndefinedCoords: ${hasUndefinedCoords} (coords: ${context.shape?.x},${context.shape?.y})`);
-            console.log(`[POSITION] - hasContextPosition: ${hasContextPosition} (context: ${context.position?.x},${context.position?.y})`);
-            
-            // shape.append가 발생할 가능성이 높은 경우: 유효한 parent가 있고 context.position이 있음
             const isLikelyAppendOperation = hasValidParent && hasContextPosition;
             
-            if (isLikelyAppendOperation) {
-              console.log(`[POSITION] 🚫 BLOCKING shape.create for ${context.shape.id} - shape.append will follow with correct position`);
-              // Y.js 저장하지 않음 - shape.append에서만 저장
-            } else {
-              console.log(`[POSITION] 📤 Direct shape.create - proceeding immediately`);
+            if (!isLikelyAppendOperation) {
               this._syncShapeCreate(context);
             }
-          } else {
-            console.log(`[POSITION] Skipping shape.create during append for ${context.shape?.id} - will be handled by shape.append`);
           }
           break;
           
@@ -276,16 +258,11 @@ export class BpmnSyncManager extends EventEmitter {
           break;
           
         case 'shape.append':
-          // shape.append는 요소 생성 + 연결 생성을 포함
-          // 먼저 플래그 설정하여 shape.create 이벤트 차단
           this._isAppendingShape = true;
-          console.log(`[POSITION] Starting shape.append for ${context.shape?.id}, blocking individual shape.create`);
-          
           try {
             this._syncShapeAppend(context);
           } finally {
             this._isAppendingShape = false;
-            console.log(`[POSITION] Completed shape.append for ${context.shape?.id}, re-enabling shape.create`);
           }
           break;
           
@@ -314,25 +291,13 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeCreate(context) {
-    debugger;
+    console.log(`[FUNC] _syncShapeCreate(${context.shape?.id})`);
+    
     const { shape, position } = context;
-    
-    // 이미 Y.js에 존재하는 요소인지 확인 (중복 생성 방지)
     const existingElement = this.yjsDocManager.getElement(shape.id);
-    if (existingElement) {
-      this._log(`Element ${shape.id} already exists in Y.js, skipping sync`, 'debug');
-      return;
-    }
-    
-    console.log(`[POSITION] 🔵 Local shape created: ${shape.id} - shape(${shape.x},${shape.y}) context(${position?.x || 'none'},${position?.y || 'none'})`);
-    
-    // 이미 상위에서 shape.append 여부를 판단했으므로, 여기서는 바로 진행
-    // context.position이 있으면 사용, 없으면 shape 좌표 사용
+    if (existingElement) return;
     
     const elementData = this._extractElementData(shape, position);
-    console.log(`[POSITION] 📤 Proceeding with Y.js sync: ${shape.id} at x=${elementData.x}, y=${elementData.y}`);
-    
-    this._log(`Syncing shape create: ${shape.id} (${shape.type})`, 'info');
     
     try {
       // 안전한 Y.js 트랜잭션 실행
@@ -391,65 +356,38 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeAppend(context) {
+    console.log(`[FUNC] _syncShapeAppend(${context.shape?.id})`);
+    
     const { shape, source, connection } = context;
-    
-    // 개선된 위치 결정 로직 사용
-    console.log(`[POSITION] Starting shape.append for ${shape.id}`);
-    console.log(`[POSITION] Original shape position: x=${shape.x}, y=${shape.y}`);
-    
-    // 최적 위치 정보 가져오기
     const bestPosition = this._getBestPosition(context, shape.id);
     
     if (bestPosition) {
       shape.x = bestPosition.x;
       shape.y = bestPosition.y;
-      console.log(`[POSITION] ✅ Applied best position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
     } else if (shape.x === undefined || shape.y === undefined) {
-      // fallback: source 기준 계산 또는 기본값
       if (source && source.x !== undefined && source.y !== undefined) {
-        shape.x = source.x + 150; // source 오른쪽에 배치
+        shape.x = source.x + 150;
         shape.y = source.y;
-        console.log(`[POSITION] Fallback to source-based position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
       } else {
-        // 최후 기본 위치
         shape.x = 240;
         shape.y = 60;
-        console.log(`[POSITION] Fallback to default position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
       }
-    } else {
-      console.log(`[POSITION] Keeping original position for ${shape.id}: x=${shape.x}, y=${shape.y}`);
     }
     
-    console.log(`[POSITION] Shape append: ${shape.id} at x=${shape.x}, y=${shape.y} from source ${source?.id}`);
-    console.log(`[DEBUG] Full context:`, JSON.stringify(context, null, 2));
-    this._log(`Syncing shape append: ${shape.id} from ${source?.id}`, 'info');
-    this._log(`Shape append context:`, 'debug', context);
-    
     try {
-      // shape.append에서는 항상 새로운 요소여야 함
       const existingElement = this.yjsDocManager.getElement(shape.id);
       if (existingElement) {
-        console.error(`[ERROR] Shape ${shape.id} already exists in Y.js during append! This indicates shape.create was not properly blocked.`);
-        console.error(`[ERROR] Removing existing element and creating new one with correct position`);
-        
-        // 기존 요소 삭제 후 새로 생성
         this.yjsDocManager.doc.transact(() => {
           const yElements = this.yjsDocManager.getElementsMap();
           yElements.delete(shape.id);
-          console.log(`[POSITION] Deleted existing element ${shape.id}`);
         }, this.clientId);
       }
-      
-      // 새로운 요소 생성 (shape.append에서는 이미 올바른 위치가 shape에 설정됨)
-      console.log(`[POSITION] Creating new element ${shape.id} at x=${shape.x}, y=${shape.y}`);
       
       this.yjsDocManager.doc.transact(() => {
         const yElements = this.yjsDocManager.getElementsMap();
         const elementData = this._extractElementData(shape);
-        
-        console.log(`[POSITION] Using shape.append position for ${shape.id}: x=${elementData.x}, y=${elementData.y}`);
-        
         const yElement = new Y.Map();
+        
         Object.entries(elementData).forEach(([key, value]) => {
           if (value !== undefined) {
             yElement.set(key, value);
@@ -457,16 +395,6 @@ export class BpmnSyncManager extends EventEmitter {
         });
         
         yElements.set(shape.id, yElement);
-        console.log(`[POSITION] Stored element ${shape.id} in Y.js with position x=${elementData.x}, y=${elementData.y}`);
-        
-        // 트랜잭션 완료 후 검증
-        const storedElement = yElements.get(shape.id);
-        const storedData = storedElement.toJSON();
-        if (storedData.x !== elementData.x || storedData.y !== elementData.y) {
-          console.error(`[POSITION] Y.js storage FAILED: Expected x=${elementData.x}, y=${elementData.y}, but got x=${storedData.x}, y=${storedData.y}`);
-        } else {
-          console.log(`[POSITION] Y.js storage SUCCESS: Position correctly stored for ${shape.id}`);
-        }
       }, this.clientId);
       
       // 2. 연결이 생성된 경우 연결도 동기화
@@ -829,27 +757,18 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleYjsChanges(event, transaction) {
-    // 자신의 변경은 무시 (동기화 루프 방지)
-    if (transaction.origin === this.clientId) {
-      this._log(`Ignoring own Y.js changes (origin: ${transaction.origin})`, 'debug');
-      return;
-    }
+    console.log(`[FUNC] _handleYjsChanges(${event.changes.keys.size} changes, origin: ${transaction.origin})`);
     
-    // 동기화 루프 방지
+    if (transaction.origin === this.clientId) return;
     this.isApplyingRemoteChanges = true;
-    
-    this._log(`Handling Y.js changes: ${event.changes.keys.size} key changes`, 'info');
     
     try {
       event.changes.keys.forEach((change, key) => {
-        this._log(`Y.js change: ${change.action} for element ${key}`, 'debug');
-        
         if (change.action === 'add') {
           this._applyRemoteElementCreate(key);
         } else if (change.action === 'delete') {
           this._applyRemoteElementDelete(key);
         } else if (change.action === 'update') {
-          console.log(`[POSITION] Y.js update detected for ${key}`);
           this._applyRemoteElementUpdate(key);
         }
       });
@@ -865,31 +784,20 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _applyRemoteElementCreate(elementId) {
+    console.log(`[FUNC] _applyRemoteElementCreate(${elementId})`);
+    
     const yElement = this.yjsDocManager.getElement(elementId);
-    if (!yElement) {
-      this._log(`Remote element ${elementId} not found in Y.js document`, 'warn');
-      return;
-    }
+    if (!yElement) return;
     
     const elementData = yElement.toJSON();
     const elementType = elementData.type;
     
-    this._log(`Applying remote element create: ${elementId} (${elementType})`, 'info');
+    if (this.elementRegistry.get(elementId)) return;
     
-    // 이미 존재하는 요소인지 확인
-    if (this.elementRegistry.get(elementId)) {
-      this._log(`Element ${elementId} already exists in BPMN model`, 'debug');
-      return;
-    }
-    
-    // 요소 타입에 따른 생성
     if (this._isConnectionType(elementType)) {
       this._createRemoteConnection(elementId, elementData);
     } else {
-      const createdShape = this._createRemoteShape(elementId, elementData);
-      if (createdShape) {
-        this._log(`Successfully created remote shape: ${elementId}`, 'debug');
-      }
+      this._createRemoteShape(elementId, elementData);
     }
   }
   
@@ -909,20 +817,15 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _applyRemoteElementUpdate(elementId) {
+    console.log(`[FUNC] _applyRemoteElementUpdate(${elementId})`);
+    
     const element = this.elementRegistry.get(elementId);
-    if (!element) {
-      console.log(`[POSITION] Remote update: element ${elementId} not found in registry`);
-      return;
-    }
+    if (!element) return;
     
     const yElement = this.yjsDocManager.getElement(elementId);
-    if (!yElement) {
-      console.log(`[POSITION] Remote update: element ${elementId} not found in Y.js`);
-      return;
-    }
+    if (!yElement) return;
     
     const updates = yElement.toJSON();
-    console.log(`[POSITION] Remote update for ${elementId}: x=${updates.x}, y=${updates.y} (current: x=${element.x}, y=${element.y})`);
     
     // 위치/크기 업데이트 (더 엄격한 비교)
     if (updates.x !== undefined || updates.y !== undefined) {
@@ -1097,36 +1000,24 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _extractElementData(element, overridePosition = null) {
+    console.log(`[FUNC] _extractElementData(${element.id}, override: ${!!overridePosition})`);
+    
     const businessObject = element.businessObject || {};
     const di = element.di || {};
     
-    // 위치 정보 결정 - overridePosition 우선 사용
     let x = element.x;
     let y = element.y;
     
-    // overridePosition이 있으면 우선 사용 (context.position에서 전달된 실제 클릭 위치)
     if (overridePosition && overridePosition.x !== undefined && overridePosition.y !== undefined) {
-      x = element.x;
-      y = element.y;
-      console.log(`[POSITION] 🎯 Using override position for ${element.id}: x=${x}, y=${y} (shape had: ${element.x}, ${element.y})`);
+      x = overridePosition.x;
+      y = overridePosition.y;
     }
     
-    // 위치가 여전히 유효하지 않으면 기본값 사용
     const isValidX = typeof x === 'number' && !isNaN(x);
     const isValidY = typeof y === 'number' && !isNaN(y);
     
-    if (!isValidX) {
-      x = overridePosition.x; // 기본 x 좌표
-      console.log(`[POSITION] ⚠️ Invalid x for ${element.id}: ${element.x} -> ${x}`);
-    }
-    
-    if (!isValidY) {
-      y = overridePosition.y; // 기본 y 좌표  
-      console.log(`[POSITION] ⚠️ Invalid y for ${element.id}: ${element.y} -> ${y}`);
-    }
-    
-    // 최종 결과 로그
-    console.log(`[POSITION] 📦 Extract result for ${element.id}: x=${x}, y=${y}`);
+    if (!isValidX) x = 100;
+    if (!isValidY) y = 100;
     
     return {
       id: element.id,
