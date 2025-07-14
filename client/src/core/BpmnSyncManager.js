@@ -29,8 +29,8 @@ export class BpmnSyncManager extends EventEmitter {
     
     // 설정 옵션
     this.options = {
-      debounceDelay: 300,           // 디바운스 지연 시간 (ms)
-      batchUpdateInterval: 100,      // 배치 업데이트 간격 (ms)
+      debounceDelay: 1000,           // 디바운스 지연 시간 (ms) - 1초로 증가
+      batchUpdateInterval: 500,      // 배치 업데이트 간격 (ms) - 0.5초로 증가
       enableLogging: true,           // 로깅 활성화
       maxRetries: 3,                 // 최대 재시도 횟수
       ...options
@@ -291,7 +291,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeCreate(context) {
-    console.log(`[FUNC] _syncShapeCreate(${context.shape?.id})`);
+    console.log(`[FUNC] _syncShapeCreate(${context})`);
     
     const { shape, position } = context;
     const existingElement = this.yjsDocManager.getElement(shape.id);
@@ -341,6 +341,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeDelete(context) {
+    console.log(`[FUNC] _syncShapeDelete(${context.shape?.id})`);    
     const { shape } = context;
     
     this.yjsDocManager.doc.transact(() => {
@@ -356,7 +357,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeAppend(context) {
-    console.log(`[FUNC] _syncShapeAppend(${context.shape?.id})`);
+    console.log(`[FUNC] _syncShapeAppend(${context})`);
     
     const { shape, source, connection } = context;
     const bestPosition = this._getBestPosition(context, shape.id);
@@ -490,6 +491,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncShapeMove(context) {
+    console.log(`[FUNC] _syncShapeMove(${context})`);
     let { shapes, delta, shape } = context;
     
     // 단일 shape을 배열로 변환
@@ -544,6 +546,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncUpdateProperties(context) {
+    console.log(`[FUNC] _syncUpdateProperties(${context.shape?.id})`);    
     const { element, properties } = context;
     
     this.yjsDocManager.doc.transact(() => {
@@ -594,6 +597,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _syncConnectionCreate(context) {
+    console.log(`[FUNC] _syncConnectionCreate(${context.shape?.id})`);        
     const { connection } = context;
     const connectionData = this._extractConnectionData(connection);
     
@@ -663,6 +667,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleElementsChanged(event) {
+    // console.log(`[FUNC] _handleElementsChanged(${event})`);   
     // 원격 변경 적용 중이면 무시
     if (this.isApplyingRemoteChanges) {
       return;
@@ -692,6 +697,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleYjsDeepChanges(events, transaction) {
+    console.log(`[FUNC] _handleElementsChanged(${transaction})`);       
     // 자신의 변경인 경우 무시 (동기화 루프 방지)
     if (transaction.origin === this.clientId) {
       return;
@@ -951,6 +957,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _startBatchUpdateProcessor() {
+    console.log(`[FUNC] _startBatchUpdateProcessor()`);
     this.batchUpdateInterval = setInterval(() => {
       if (this.pendingLocalChanges.size === 0) return;
       
@@ -1045,6 +1052,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _extractConnectionData(connection) {
+    console.log(`[FUNC] _extractConnectionData(${element.id}, override: ${!!overridePosition})`);
     const businessObject = connection.businessObject || {};
     
     // source/target 정보를 더 안전하게 추출
@@ -1118,6 +1126,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _createRemoteShape(elementId, elementData) {
+    console.log(`[FUNC] _createRemoteShape(elementId : ${elementId}, elementData: ${elementData})`);  
     const { type, x, y, width, height, parent, businessObject } = elementData;
     
     // 요소가 이미 존재하는지 다시 한 번 확인
@@ -1230,6 +1239,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _createRemoteConnection(elementId, connectionData) {
+    console.log(`[FUNC] _createRemoteConnection(elementId : ${elementId}, connectionData: ${connectionData})`);      
     const { source, target, waypoints, businessObject } = connectionData;
     
     // source, target이 undefined인 경우 로그 출력 후 리턴
@@ -1298,6 +1308,8 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _createBusinessObject(data) {
+    console.log(`[FUNC] _createBusinessObject(data : ${data})`);      
+
     try {
       const bpmnFactory = this.modeler.get('bpmnFactory');
       
@@ -1353,6 +1365,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleSelectionChanged(event) {
+    console.log(`[FUNC] _handleSelectionChanged(event : ${event})`);      
     // 원격 변경 적용 중이면 무시 (동기화 루프 방지)
     if (this.isApplyingRemoteChanges) {
       return;
@@ -1500,6 +1513,7 @@ export class BpmnSyncManager extends EventEmitter {
    * @returns {boolean} 성공 여부
    */
   _safeYjsTransaction(callback) {
+    console.log(`[FUNC] _safeYjsTransaction(callback : ${callback})`);         
     try {
       // 트랜잭션 깊이 추적
       if (!this.transactionDepth) {
