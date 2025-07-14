@@ -853,6 +853,12 @@ export class BpmnSyncManager extends EventEmitter {
    * @private
    */
   _handleYjsChanges(event, transaction) {
+    // 자신의 변경은 무시 (동기화 루프 방지)
+    if (transaction.origin === this.clientId) {
+      this._log(`Ignoring own Y.js changes (origin: ${transaction.origin})`, 'debug');
+      return;
+    }
+    
     // 동기화 루프 방지
     this.isApplyingRemoteChanges = true;
     
